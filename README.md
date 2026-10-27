@@ -1,60 +1,57 @@
-# MoneyBee Screening Test
+# MoneyBee Screening
 
-A small web page to test name screening. Type a person or company, get matches from the UN Security Council consolidated sanctions list with a score out of 100.
+Customer screening for onboarding: name, date of birth, nationality and ID checks against sanctions lists, with login, review workflow, PDF reports, batch upload and ongoing monitoring. Built for UAE go live.
 
-## Run it (Mac or Windows)
+## What is screened
 
-1. Install Node.js 18 or newer from https://nodejs.org (skip if `node -v` already works).
-2. Open Terminal in this folder and run:
+| List | Source | How it is loaded |
+| --- | --- | --- |
+| UN Security Council consolidated | UN XML feed | automatic, every 6 hours |
+| OFAC SDN (US) | OFAC XML feed | automatic |
+| EU consolidated financial sanctions | EU FSF XML feed | automatic |
+| UK Sanctions List | FCDO XML feed | automatic |
+| UAE Local Terrorist List (EOCN) | published only as PDF or Excel | admin uploads .xlsx or .csv on the Lists page |
+| Custom list | your own watchlist | admin upload (optional) |
+| FATF black and grey lists, UN country regimes | editable country lists | admin edits and marks as verified |
 
-```bash
-npm install
-npm start
+Paid providers (PEP, adverse media, INTERPOL, FBI, Europe's Most Wanted, FIU India) are shown as **Not connected** on screen and on every report. They are never reported as screened. Add an adapter in `lib/providers.js` to connect one.
+
+A screening is marked **incomplete** when a required list has no data or is older than 48 hours. Do not treat a clear result on an incomplete screening as clear.
+
+## Run locally
+
+```
+export DATABASE_URL=postgres://user:pass@localhost:5432/screening
+export SESSION_SECRET=$(openssl rand -hex 32)
+export ADMIN_EMAIL=you@example.com ADMIN_PASSWORD='a-long-password-1'
+npm ci && npm start
 ```
 
-3. Open http://localhost:3000
+The first administrator is created from `ADMIN_EMAIL` and `ADMIN_PASSWORD` and must change the password at first sign in.
 
-On start it downloads the live UN list (a few MB) and keeps a copy in `data/`. The banner at the top of the page shows which source is in use. If it says FICTIONAL SAMPLE DATA, the download failed and you are only testing against 3 made-up names (try "Alex Demoson" or "Demo Trading Company").
+Other settings: `PORT`, `NODE_ENV=production`, `DATABASE_SSL=true`, `REFRESH_HOURS`, `STALE_HOURS`, `DISABLE_FEEDS=true`, and `UN_URLS`, `OFAC_URLS`, `EU_URLS`, `UK_URLS` to override feed addresses.
 
-## Run it with Docker instead
+## Tests
 
-1. Install Docker Desktop and make sure it is running.
-2. In this folder run:
-
-```bash
-docker compose up -d --build
+```
+npm test                                    # unit tests
+TEST_DATABASE_URL=postgres://... npm test   # adds end to end tests (wipes that database)
 ```
 
-3. Open http://localhost:3000
+## Go live checklist
 
-Useful commands: `docker compose logs -f` to watch it load the UN list, `docker compose down` to stop it. The downloaded list is kept in a Docker volume, so restarts are fast and work offline.
+1. Sign in, change the password, add users (analyst screens and reviews, viewer is read only).
+2. Lists page: confirm UN, OFAC, EU, UK show Ready.
+3. Download the current UAE Local Terrorist List from the EOCN site, save as .xlsx or .csv, upload it, check the column mapping. Repeat on every change. Until then every screening is incomplete.
+4. Check the FATF and UN country lists against the official pages, edit if needed, press Mark as verified.
+5. Set default scan criteria under Settings.
+6. Screen a few known names and download the PDF.
 
-To also query Watchman, uncomment the `WATCHMAN_URL` line in `docker-compose.yml`.
+## Open items
 
-## How to read results
-
-- 90 and above: strong match, a person should review.
-- 70 to 89: possible match, a person should review.
-- Nothing listed: no name scored 70 or above.
-
-Matching is by name only. It handles spelling variants and aliases but does not use date of birth or country yet, so common names can produce false hits.
-
-## Also query Watchman (optional)
-
-If you run a Watchman instance, point the page at it and its raw response shows under the UN matches:
-
-```bash
-WATCHMAN_URL=http://localhost:8084 npm start
-```
-
-Watchman changed its API between versions, so the page tries `/v2/search` first and then `/search`. Adjust the port to match your setup.
-
-## Not covered yet
-
-UAE Local Terrorist List, OFAC SDN, and PEPs. See LIVE_DATA.md in the moneybee-risk-datasources repo. For testing only, not a compliance decision.
-
-## Self-test
-
-```bash
-npm test
-```
+* Paid providers are not connected.
+* Arabic script names are matched on their transliterated forms and are not drawn in the PDF.
+* ID numbers are stored in the database in plain text. Decide on encryption and a retention period before handling live customer data.
+* The UAE list is a manual upload. Set a reminder to refresh it.
+* Sessions last 8 hours. The login brake is in memory and resets on restart.
+* Railway does not redeploy on push for this service. Redeploy from the dashboard after pushing.
