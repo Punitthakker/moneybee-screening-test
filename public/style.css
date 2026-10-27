@@ -73,3 +73,7 @@ tr.click:hover td { background: var(--blue-bg); }
 details summary { cursor: pointer; color: var(--muted); }
 code, .mono { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 13px; }
 @media (max-width: 640px) { .kv { grid-template-columns: 1fr; } .review .grid { grid-template-columns: 1fr; } header.top { gap: 10px; padding: 0 12px; } main { padding: 16px 12px 60px; } }
+@media (max-width: 760px){ .two-col{grid-template-columns:1fr !important} }
+header.top nav a { padding: 6px 8px; font-size: 14px; }
+header.top { gap: 14px; }
+@media (max-width: 1100px) { header.top .who { display: none; } header.top a.who { display: flex; } }

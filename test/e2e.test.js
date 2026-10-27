@@ -232,6 +232,20 @@ if (!url) {
     assert.strictEqual(cust.risk_status, 'open_alert');
   });
 
+  test('dashboard and CSV exports', async () => {
+    const d = await analyst('GET', '/api/dashboard');
+    assert.strictEqual(d.status, 200, d.text);
+    assert.ok(d.json.customers.total >= 5);
+    assert.strictEqual(d.json.days.length, 7);
+    assert.ok(d.json.recent.length > 0);
+    assert.ok(d.json.lists.find((l) => l.key === 'un'));
+    const c = await analyst('GET', '/api/customers.csv');
+    assert.match(c.text, /reference,name,type/);
+    assert.match(c.text, /C-9/);
+    const a = await analyst('GET', '/api/alerts.csv');
+    assert.match(a.text, /screening_id,reference/);
+  });
+
   test('audit log records actions and is admin only', async () => {
     assert.strictEqual((await analyst('GET', '/api/audit')).status, 403);
     const a = await admin('GET', '/api/audit?action=screening');

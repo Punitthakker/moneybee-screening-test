@@ -83,6 +83,7 @@ function field(label, input, hint) { return h('div', {}, h('label', {}, label), 
 
 // ---------------------------------------------------------------- shell
 const NAV = [
+  ['dashboard', 'Dashboard', () => true],
   ['screen', 'Screen', () => true],
   ['customers', 'Customers', () => true],
   ['alerts', 'Alerts', () => true],
@@ -106,9 +107,47 @@ function shell(active, content) {
       h('div', { class: 'brand' }, 'MoneyBee Screening'),
       h('nav', {}, NAV.filter((n) => n[2]()).map(([key, label]) =>
         h('a', { href: '#/' + key, class: key === active ? 'on' : '' }, label, key === 'alerts' && state.alertCount ? h('span', { class: 'badge' }, state.alertCount) : null))),
+      listHealth(),
       h('div', { class: 'who' }, state.user.name + ' (' + state.user.role + ')'),
       h('button', { onclick: () => guard(async () => { await api('POST', '/logout'); state.user = null; renderLogin(); }) }, 'Sign out')),
     h('main', {}, content));
+}
+
+
+function listHealth() {
+  const bad = ((state.meta && state.meta.lists) || []).filter((l) => l.kind === 'sanctions' && l.required && (l.status !== 'ready' || l.stale));
+  return h('a', { href: '#/lists', class: 'who', style: 'text-decoration:none;display:flex;align-items:center;gap:6px', title: bad.length ? bad.map((l) => l.name).join(', ') : 'All required lists are loaded and current' },
+    h('span', { style: 'width:8px;height:8px;border-radius:50%;background:' + (bad.length ? 'var(--red)' : 'var(--green)') }), bad.length ? bad.length + ' list(s) not ready' : 'Lists current');
+}
+
+async function viewDashboard() {
+  const d = await api('GET', '/dashboard');
+  const max = Math.max(1, ...d.days.map((x) => x.n));
+  const kpi = (n, label, href, tone) => h('a', { href, class: 'panel', style: 'text-decoration:none;margin:0;display:block' }, h('div', { style: 'font-size:28px;font-weight:600;' + (tone ? 'color:var(--' + tone + ')' : '') }, n), h('div', { class: 'muted small' }, label));
+  const notReady = d.lists.filter((l) => l.required && (l.status !== 'ready' || l.stale));
+  shell('dashboard', [
+    h('h1', {}, 'Dashboard'),
+    h('p', { class: 'muted' }, 'Where things stand today.'),
+    notReady.length ? h('div', { class: 'banner red' }, 'Required lists not ready: ' + notReady.map((l) => l.name).join('; ') + '. New screenings are marked incomplete.') : null,
+    h('div', { class: 'grid', style: 'margin:14px 0' },
+      kpi(d.openAlerts, 'Open alerts to review', '#/alerts', d.openAlerts ? 'red' : 'green'),
+      kpi(d.customers.total, 'Customers on file', '#/customers'),
+      kpi(d.customers.monitored, 'Under ongoing monitoring', '#/customers'),
+      kpi(d.week.week, 'Screenings in the last 7 days', '#/customers'),
+      kpi(d.customers.confirmed, 'Confirmed true matches', '#/customers', d.customers.confirmed ? 'red' : null),
+      kpi(d.week.incomplete, 'Incomplete screenings, last 7 days', '#/lists', d.week.incomplete ? 'amber' : 'green')),
+    h('div', { class: 'two-col', style: 'display:grid;grid-template-columns:1fr 1fr;gap:16px' },
+      h('div', { class: 'panel' }, h('h3', {}, 'Screenings per day'),
+        h('div', { style: 'display:flex;gap:8px;align-items:flex-end;height:110px' }, d.days.map((x) => h('div', { style: 'flex:1;text-align:center', title: x.n + ' screenings, ' + x.alerts + ' with alerts' },
+          h('div', { style: 'background:var(--accent);height:' + Math.round((90 * x.n) / max) + 'px;border-radius:3px 3px 0 0;min-height:2px' }), h('div', { class: 'muted small' }, x.day.slice(8)))))),
+      h('div', { class: 'panel' }, h('h3', {}, 'List freshness'),
+        h('table', {}, h('tbody', {}, d.lists.map((l) => h('tr', {}, h('td', {}, l.name), h('td', {}, l.status === 'ready' && !l.stale ? pill('Ready', 'green') : pill(l.stale ? 'Out of date' : l.status === 'empty' ? 'No data' : l.status, 'red')), h('td', { class: 'small muted' }, l.records ? l.records.toLocaleString('en-GB') : ''))))))),
+    h('h2', {}, 'Recent screenings'),
+    h('div', { class: 'tbl-wrap' }, h('table', {}, h('thead', {}, h('tr', {}, ['When', 'Reference', 'Customer', 'Result', 'Review'].map((x) => h('th', {}, x)))),
+      h('tbody', {}, d.recent.length ? d.recent.map((s) => h('tr', { class: 'click', onclick: () => (location.hash = '#/screening/' + s.id) }, h('td', {}, fmtTime(s.created_at)), h('td', { class: 'mono' }, s.ref), h('td', {}, s.name),
+        h('td', {}, s.hit_count ? pill(s.hit_count + ' possible match(es)', 'red') : pill('No matches', 'green'), ' ', s.incomplete ? pill('Incomplete', 'red') : null),
+        h('td', {}, s.review_status === 'none' ? '' : s.review_status === 'open' ? 'Open' : 'Closed: ' + (s.outcome === 'true_match' ? 'true match' : 'cleared')))) : h('tr', {}, h('td', { colspan: 5, class: 'muted' }, 'No screenings yet. Go to Screen to run the first one.'))))),
+  ]);
 }
 
 // ---------------------------------------------------------------- login and password
@@ -368,7 +407,7 @@ async function viewCustomers() {
       h('div', { class: 'row spread', style: 'margin-top:10px' }, h('span', { class: 'muted small' }, r.total + ' customers'),
         h('div', { class: 'row' }, h('button', { disabled: page === 0, onclick: () => { page--; load(); } }, 'Previous'), h('button', { disabled: (page + 1) * 50 >= r.total, onclick: () => { page++; load(); } }, 'Next'))));
   }
-  shell('customers', [h('h1', {}, 'Customers'), h('div', { class: 'row', style: 'margin:12px 0' }, qi, st), body]);
+  shell('customers', [h('div', { class: 'row spread' }, h('h1', {}, 'Customers'), h('a', { class: 'btn', href: '/api/customers.csv' }, 'Export CSV')), h('div', { class: 'row', style: 'margin:12px 0' }, qi, st), body]);
   await load();
 }
 
@@ -401,7 +440,7 @@ async function viewAlerts() {
         h('td', {}, a.review_status === 'open' ? pill('Open', 'red') : pill(a.outcome === 'true_match' ? 'True match' : 'Cleared', a.outcome === 'true_match' ? 'red' : 'green')))) : h('tr', {}, h('td', { colspan: 6, class: 'muted' }, tab === 'open' ? 'No open alerts.' : 'Nothing here yet.'))))));
   }
   const tabs = h('div', { class: 'tabs' }, ['open', 'closed'].map((t) => h('button', { class: t === tab ? 'on' : '', onclick: (e) => { tab = t; [...tabs.children].forEach((b) => b.classList.remove('on')); e.target.classList.add('on'); load(); } }, t === 'open' ? 'Open' : 'Closed')));
-  shell('alerts', [h('h1', {}, 'Alerts'), h('p', { class: 'muted' }, 'Screenings with possible matches that need a decision. Ongoing monitoring adds alerts here when a list changes.'), tabs, body]);
+  shell('alerts', [h('div', { class: 'row spread' }, h('h1', {}, 'Alerts'), h('a', { class: 'btn', href: '/api/alerts.csv' }, 'Export CSV')), h('p', { class: 'muted' }, 'Screenings with possible matches that need a decision. Ongoing monitoring adds alerts here when a list changes.'), tabs, body]);
   await load();
 }
 
@@ -582,21 +621,21 @@ async function viewSettings() {
 
 // ---------------------------------------------------------------- router and boot
 const ROUTES = {
-  screen: viewScreen, customers: viewCustomers, alerts: viewAlerts, batch: viewBatch, lists: viewLists,
+  dashboard: viewDashboard, screen: viewScreen, customers: viewCustomers, alerts: viewAlerts, batch: viewBatch, lists: viewLists,
   users: viewUsers, audit: viewAudit, settings: viewSettings,
 };
 
 async function route() {
   if (!state.user) return;
   const parts = location.hash.replace(/^#\/?/, '').split('/');
-  const name = parts[0] || 'screen';
+  const name = parts[0] || 'dashboard';
   await guard(async () => {
     state.meta = await api('GET', '/meta');
     if (name === 'screening' && parts[1]) return viewScreening(parts[1]);
     if (name === 'customer' && parts[1]) return viewCustomer(parts[1]);
     const adminOnly = ['users', 'audit', 'settings'];
     if (adminOnly.includes(name) && !isAdmin()) { location.hash = '#/screen'; return; }
-    return (ROUTES[name] || viewScreen)();
+    return (ROUTES[name] || viewDashboard)();
   });
 }
 
