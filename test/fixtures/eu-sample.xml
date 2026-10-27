@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- FICTIONAL SAMPLE DATA in the EU Financial Sanctions File 1.1 format. -->
+<export generationDate="2026-10-01T00:00:00.000+02:00" globalFileId="1">
+  <sanctionEntity logicalId="700001" euReferenceNumber="EU.700001.01">
+    <regulation programme="SAMPLE-EU" publicationDate="2024-01-01"/>
+    <subjectType code="person" classificationCode="P"/>
+    <nameAlias wholeName="Vladislav Samplenko" strong="true" gender="M"/>
+    <nameAlias wholeName="Vlad Samplenko" strong="false"/>
+    <birthdate birthdate="1969-11-02" countryIso2Code="BY"/>
+    <citizenship countryIso2Code="BY"/>
+    <identification number="EU555777" identificationTypeCode="passport" countryIso2Code="BY"/>
+  </sanctionEntity>
+  <sanctionEntity logicalId="700002" euReferenceNumber="EU.700002.01">
+    <regulation programme="SAMPLE-EU"/>
+    <subjectType code="enterprise" classificationCode="E"/>
+    <nameAlias wholeName="Sample Heavy Industries JSC" strong="true"/>
+    <address countryIso2Code="RU" city="Moscow"/>
+  </sanctionEntity>
+</export>

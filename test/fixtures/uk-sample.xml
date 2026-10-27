@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- FICTIONAL SAMPLE DATA in the UK Sanctions List format. -->
+<Designations DateGenerated="2026-10-01T00:00:00">
+  <Designation>
+    <UniqueID>UK-0001</UniqueID>
+    <OFSIGroupID>12345</OFSIGroupID>
+    <RegimeName>Sample Regime</RegimeName>
+    <DateDesignated>2023-02-02</DateDesignated>
+    <IndividualEntityShip>Individual</IndividualEntityShip>
+    <Names>
+      <Name><Name6>Samplington</Name6><Name1>Oleg</Name1><NameType>Primary Name</NameType></Name>
+      <Name><Name6>Samplingtonov</Name6><Name1>Oleg</Name1><NameType>Alias</NameType></Name>
+    </Names>
+    <IndividualDetails>
+      <Individual><DOB>1971-09-30</DOB><Nationality>Kazakhstan</Nationality><Gender>Male</Gender></Individual>
+    </IndividualDetails>
+  </Designation>
+</Designations>

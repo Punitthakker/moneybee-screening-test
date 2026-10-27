@@ -1,166 +1,81 @@
-// MoneyBee screening test server.
-// - Loads the UN Security Council consolidated list (downloaded on start, cached in ./data).
-// - Falls back to a FICTIONAL sample list if the download fails and there is no cache.
-// - Optional: set WATCHMAN_URL to also query a running Watchman instance.
+'use strict';
 
-const http = require("http");
-const fs = require("fs");
-const path = require("path");
-const { XMLParser } = require("fast-xml-parser");
-const { scoreRecord } = require("./match");
+const path = require('path');
+const express = require('express');
+const cfg = require('./lib/config');
+const db = require('./lib/db');
+const auth = require('./lib/auth');
+const { ListManager } = require('./lib/lists');
+const monitor = require('./lib/monitor');
+const buildRouter = require('./lib/routes');
 
-const PORT = Number(process.env.PORT || 3000);
-const WATCHMAN_URL = (process.env.WATCHMAN_URL || "").replace(/\/$/, "");
-const UN_URL = "https://scsanctions.un.org/resources/xml/en/consolidated.xml";
-const DATA_DIR = path.join(__dirname, "data");
-const CACHE_FILE = path.join(DATA_DIR, "un-consolidated.xml");
-const SAMPLE_FILE = path.join(__dirname, "sample-un.xml");
-const MIN_SCORE = 70;
+async function createApp(manager) {
+  const app = express();
+  app.set('trust proxy', 1);
+  app.disable('x-powered-by');
 
-const arr = (v) => (v === undefined || v === null ? [] : Array.isArray(v) ? v : [v]);
-const text = (v) => (v === undefined || v === null ? "" : String(typeof v === "object" ? v["#text"] ?? "" : v)).trim();
-
-function parseUN(xml) {
-  const parser = new XMLParser({ ignoreAttributes: false, parseTagValue: false, trimValues: true });
-  const doc = parser.parse(xml);
-  const root = doc.CONSOLIDATED_LIST || {};
-  const records = [];
-
-  for (const p of arr(root.INDIVIDUALS && root.INDIVIDUALS.INDIVIDUAL)) {
-    const name = [p.FIRST_NAME, p.SECOND_NAME, p.THIRD_NAME, p.FOURTH_NAME].map(text).filter(Boolean).join(" ");
-    if (!name) continue;
-    records.push({
-      id: text(p.DATAID),
-      type: "person",
-      name,
-      aliases: arr(p.INDIVIDUAL_ALIAS).map((a) => text(a.ALIAS_NAME)).filter(Boolean),
-      list: text(p.UN_LIST_TYPE),
-      ref: text(p.REFERENCE_NUMBER),
-      listedOn: text(p.LISTED_ON),
-      country: arr(p.NATIONALITY && p.NATIONALITY.VALUE).map(text).filter(Boolean).join(", "),
+  app.use((req, res, next) => {
+    res.set({
+      'X-Content-Type-Options': 'nosniff',
+      'X-Frame-Options': 'DENY',
+      'Referrer-Policy': 'same-origin',
+      'Content-Security-Policy': "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
     });
-  }
+    if (cfg.production) res.set('Strict-Transport-Security', 'max-age=31536000');
+    if (req.path.startsWith('/api/')) res.set('Cache-Control', 'no-store');
+    next();
+  });
 
-  for (const e of arr(root.ENTITIES && root.ENTITIES.ENTITY)) {
-    const name = text(e.FIRST_NAME);
-    if (!name) continue;
-    records.push({
-      id: text(e.DATAID),
-      type: "company",
-      name,
-      aliases: arr(e.ENTITY_ALIAS).map((a) => text(a.ALIAS_NAME)).filter(Boolean),
-      list: text(e.UN_LIST_TYPE),
-      ref: text(e.REFERENCE_NUMBER),
-      listedOn: text(e.LISTED_ON),
-      country: "",
-    });
-  }
-  return { records, generated: root["@_dateGenerated"] || "" };
-}
-
-const state = { records: [], source: "none", generated: "", loadedAt: null, note: "" };
-
-async function loadList() {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  try {
-    const res = await fetch(UN_URL, { signal: AbortSignal.timeout(60000) });
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    const xml = await res.text();
-    const parsed = parseUN(xml);
-    if (!parsed.records.length) throw new Error("downloaded file had no records");
-    fs.writeFileSync(CACHE_FILE, xml);
-    Object.assign(state, { records: parsed.records, source: "UN live download", generated: parsed.generated, note: "" });
-  } catch (err) {
-    if (fs.existsSync(CACHE_FILE)) {
-      const parsed = parseUN(fs.readFileSync(CACHE_FILE, "utf8"));
-      Object.assign(state, { records: parsed.records, source: "UN cached copy", generated: parsed.generated, note: "Live download failed (" + err.message + "), using the cached copy." });
-    } else {
-      const parsed = parseUN(fs.readFileSync(SAMPLE_FILE, "utf8"));
-      Object.assign(state, { records: parsed.records, source: "FICTIONAL SAMPLE DATA", generated: parsed.generated, note: "Could not download the UN list (" + err.message + "). Results below are against fictional demo names only." });
-    }
-  }
-  state.loadedAt = new Date().toISOString();
-  console.log(`Loaded ${state.records.length} records from: ${state.source}`);
-  if (state.note) console.log(state.note);
-}
-
-function searchLocal(name, type) {
-  const out = [];
-  for (const r of state.records) {
-    if (type && type !== "any" && r.type !== type) continue;
-    const { score, matchedName } = scoreRecord(name, r);
-    if (score >= MIN_SCORE) out.push({ ...r, score, matchedName });
-  }
-  out.sort((a, b) => b.score - a.score);
-  return out.slice(0, 10);
-}
-
-async function searchWatchman(name) {
-  if (!WATCHMAN_URL) return null;
-  // Watchman changed its API between versions, so try the newer path first, then the older one.
-  const paths = ["/v2/search?name=", "/search?name="];
-  let lastErr = "";
-  for (const p of paths) {
+  app.get('/health', async (req, res) => {
     try {
-      const res = await fetch(WATCHMAN_URL + p + encodeURIComponent(name) + "&limit=10", { signal: AbortSignal.timeout(15000) });
-      if (res.ok) return { ok: true, endpoint: p, data: await res.json() };
-      lastErr = p + " returned HTTP " + res.status;
-    } catch (err) {
-      lastErr = err.message;
+      await db.query('select 1');
+      const lists = manager.listStatus().filter((l) => l.kind === 'sanctions');
+      res.json({ ok: true, lists: lists.map((l) => ({ key: l.key, status: l.status, records: l.records })) });
+    } catch (e) {
+      res.status(503).json({ ok: false });
     }
-  }
-  return { ok: false, error: lastErr };
+  });
+
+  app.use('/api', express.json({ limit: '14mb' }));
+  app.use('/api', buildRouter(manager));
+  app.use('/api', (req, res) => res.status(404).json({ error: 'Not found.' }));
+  app.use(express.static(path.join(__dirname, 'public'), { maxAge: 0, etag: true }));
+
+  app.use((err, req, res, next) => {
+    if (res.headersSent) return next(err);
+    const status = err.status || (err.type === 'entity.too.large' ? 413 : 500);
+    if (status >= 500) console.error('[error]', req.method, req.path, err);
+    res.status(status).json({ error: status >= 500 ? 'Something went wrong on the server.' : err.message });
+  });
+  return app;
 }
 
-const MIME = { ".html": "text/html; charset=utf-8", ".css": "text/css", ".js": "text/javascript" };
-
-function send(res, code, body, type = "application/json") {
-  res.writeHead(code, { "Content-Type": type });
-  res.end(typeof body === "string" || Buffer.isBuffer(body) ? body : JSON.stringify(body));
+async function main() {
+  if (!cfg.sessionSecret || cfg.sessionSecret.length < 24) {
+    if (cfg.production) throw new Error('SESSION_SECRET must be set to a random value of at least 24 characters.');
+    cfg.sessionSecret = 'dev-only-secret-' + 'x'.repeat(16);
+    console.warn('SESSION_SECRET not set, using an insecure development secret.');
+  }
+  db.init(cfg.databaseUrl, cfg.databaseSsl);
+  await db.migrate();
+  await auth.seedAdmin();
+  const manager = new ListManager();
+  await manager.init();
+  monitor.attach(manager);
+  const app = await createApp(manager);
+  const server = app.listen(cfg.port, '0.0.0.0', () => console.log(`MoneyBee Screening listening on ${cfg.port}`));
+  manager.startScheduler();
+  const stop = () => server.close(() => db.close().then(() => process.exit(0)));
+  process.on('SIGTERM', stop);
+  process.on('SIGINT', stop);
+  return { app, manager, server };
 }
-
-const server = http.createServer(async (req, res) => {
-  const url = new URL(req.url, "http://localhost");
-
-  if (url.pathname === "/api/status") {
-    return send(res, 200, {
-      source: state.source,
-      records: state.records.length,
-      listGenerated: state.generated,
-      loadedAt: state.loadedAt,
-      note: state.note,
-      watchman: WATCHMAN_URL || null,
-    });
-  }
-
-  if (url.pathname === "/api/search") {
-    const name = (url.searchParams.get("name") || "").trim();
-    const type = url.searchParams.get("type") || "any";
-    if (name.length < 2) return send(res, 400, { error: "Enter at least 2 characters." });
-    const started = Date.now();
-    const [matches, watchman] = await Promise.all([Promise.resolve(searchLocal(name, type)), searchWatchman(name)]);
-    return send(res, 200, {
-      query: name,
-      type,
-      source: state.source,
-      ms: Date.now() - started,
-      matches,
-      watchman,
-    });
-  }
-
-  const file = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
-  const full = path.join(__dirname, "public", path.normalize(file).replace(/^(\.\.[/\\])+/, ""));
-  if (full.startsWith(path.join(__dirname, "public")) && fs.existsSync(full) && fs.statSync(full).isFile()) {
-    return send(res, 200, fs.readFileSync(full), MIME[path.extname(full)] || "application/octet-stream");
-  }
-  send(res, 404, { error: "Not found" });
-});
 
 if (require.main === module) {
-  loadList().then(() => {
-    server.listen(PORT, () => console.log(`Open http://localhost:${PORT}`));
+  main().catch((e) => {
+    console.error('Fatal:', e);
+    process.exit(1);
   });
 }
 
-module.exports = { parseUN, searchLocal, state, loadList, server };
+module.exports = { createApp, main };

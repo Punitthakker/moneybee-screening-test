@@ -1,0 +1,24 @@
+<?xml version="1.0" standalone="yes"?>
+<!-- FICTIONAL SAMPLE DATA in the OFAC SDN legacy XML format. -->
+<sdnList xmlns="http://tempuri.org/sdnList.xsd">
+  <publshInformation><Publish_Date>10/01/2026</Publish_Date><Record_Count>3</Record_Count></publshInformation>
+  <sdnEntry>
+    <uid>800001</uid>
+    <firstName>Karim</firstName>
+    <lastName>Fictionalov</lastName>
+    <sdnType>Individual</sdnType>
+    <programList><program>SAMPLE-PROG</program></programList>
+    <akaList><aka><uid>800101</uid><type>a.k.a.</type><category>strong</category><lastName>Kareem Fictionalov</lastName></aka></akaList>
+    <idList><id><uid>1</uid><idType>Passport</idType><idNumber>OF123456</idNumber><idCountry>United Arab Emirates</idCountry></id></idList>
+    <nationalityList><nationality><uid>2</uid><country>Egypt</country><mainEntry>true</mainEntry></nationality></nationalityList>
+    <dateOfBirthList><dateOfBirthItem><uid>3</uid><dateOfBirth>14 Jul 1982</dateOfBirth><mainEntry>true</mainEntry></dateOfBirthItem></dateOfBirthList>
+    <remarks>Gender Male.</remarks>
+  </sdnEntry>
+  <sdnEntry>
+    <uid>800002</uid>
+    <lastName>NORTHWIND SAMPLE SHIPPING CO</lastName>
+    <sdnType>Entity</sdnType>
+    <programList><program>SAMPLE-PROG</program></programList>
+    <addressList><address><uid>4</uid><city>Dubai</city><country>United Arab Emirates</country></address></addressList>
+  </sdnEntry>
+</sdnList>
