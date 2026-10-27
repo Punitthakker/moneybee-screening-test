@@ -165,6 +165,29 @@ if (!url) {
     assert.strictEqual(s.incomplete, false);
   });
 
+  test('identity document: Emirates ID validated, formatted, matched on the UAE list and searchable', async () => {
+    const csv = 'Serial,Name,Emirates ID\n1,Khalid Sampleman Testbin,784-1985-7654321-2\n';
+    const data = Buffer.from(csv).toString('base64');
+    const p = await admin('POST', '/api/lists/custom/preview', { filename: 'c.csv', data });
+    assert.strictEqual(p.json.mapping.idNumber, 'Emirates ID');
+    await admin('POST', '/api/lists/custom/import', { filename: 'c.csv', data, headerRow: p.json.headerRow, mapping: p.json.mapping, mode: 'replace' });
+    const bad = await analyst('POST', '/api/screenings', { subjects: [{ name: 'Some Person', idType: 'Emirates ID', idNumber: '123-45' }] });
+    assert.strictEqual(bad.status, 400);
+    assert.match(bad.json.error, /Emirates ID/);
+    const short = await analyst('POST', '/api/screenings', { subjects: [{ name: 'Some Person', idType: 'Passport', idNumber: 'AB1' }] });
+    assert.match(short.json.error, /too short/);
+    const r = await analyst('POST', '/api/screenings', { ref: 'EID-1', subjects: [{ name: 'Totally Different Name', idType: 'Emirates ID', idNumber: '784198576543212' }] });
+    assert.strictEqual(r.status, 200, r.text);
+    const sub = r.json.screening.results.subjects[0];
+    assert.strictEqual(sub.idNumber, '784-1985-7654321-2');
+    assert.strictEqual(sub.idCountry, 'AE');
+    assert.strictEqual(sub.hits[0].listKey, 'custom');
+    assert.strictEqual(sub.hits[0].idMatch.number, '784-1985-7654321-2');
+    const found = await analyst('GET', '/api/customers?q=784198576543212');
+    assert.strictEqual(found.json.rows[0].ref, 'EID-1');
+    await admin('DELETE', '/api/lists/custom/entries');
+  });
+
   test('PDF report renders', async () => {
     const r = await analyst('GET', `/api/screenings/${first.screeningId}/pdf`, null, true);
     assert.strictEqual(r.status, 200);

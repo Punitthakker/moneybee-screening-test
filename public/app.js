@@ -163,9 +163,23 @@ function partyBlock(idx, onRemove) {
   f.gender = h('select', {}, h('option', { value: '' }, 'Not given'), h('option', { value: 'male' }, 'Male'), h('option', { value: 'female' }, 'Female'));
   f.nationality = countryInput();
   f.country = countryInput();
-  f.idType = h('input', { placeholder: 'Passport, Emirates ID, trade licence' });
-  f.idNumber = h('input', {});
+  f.idType = h('select', {}, [['', 'No ID provided'], ['Emirates ID', 'Emirates ID'], ['Passport', 'Passport'], ['National ID', 'National ID'], ['Residence permit', 'Residence permit'], ['Trade licence', 'Trade licence (company)'], ['Other', 'Other']].map(([v, t]) => h('option', { value: v }, t)));
+  f.idNumber = h('input', { placeholder: 'Choose a document type first', autocomplete: 'off' });
   f.idCountry = countryInput();
+  f.idIssue = h('input', { type: 'date' });
+  f.idExpiry = h('input', { type: 'date' });
+  const fmtEid = () => {
+    if (f.idType.value !== 'Emirates ID') return;
+    const d = f.idNumber.value.replace(/\D/g, '').slice(0, 15);
+    f.idNumber.value = [d.slice(0, 3), d.slice(3, 7), d.slice(7, 14), d.slice(14)].filter(Boolean).join('-');
+  };
+  f.idNumber.addEventListener('input', fmtEid);
+  f.idType.addEventListener('change', () => {
+    const t = f.idType.value;
+    f.idNumber.placeholder = t === 'Emirates ID' ? '784-YYYY-NNNNNNN-C' : t === 'Passport' ? 'Passport number' : t ? 'Document number' : 'Choose a document type first';
+    if (t === 'Emirates ID' && !f.idCountry.value) f.idCountry.value = 'United Arab Emirates';
+    fmtEid();
+  });
   const personOnly = [f.dob, f.gender, f.nationality];
   const sync = () => {
     const co = f.type.value === 'company';
@@ -179,9 +193,12 @@ function partyBlock(idx, onRemove) {
     h('div', { class: 'grid' },
       field('Name', f.name), field('Type', f.type), field('Role', f.role),
       field('Date of birth', f.dob), field('Gender', f.gender), field('Nationality', f.nationality),
-      h('div', {}, countryLabel, f.country),
-      field('ID document type', f.idType), field('ID number', f.idNumber), field('ID issuing country', f.idCountry)));
-  const read = () => ({ name: f.name.value, type: f.type.value, role: f.role.value, dob: f.dob.value, gender: f.gender.value, nationality: f.nationality.value, country: f.country.value, idType: f.idType.value, idNumber: f.idNumber.value, idCountry: f.idCountry.value });
+      h('div', {}, countryLabel, f.country)),
+    h('div', { style: 'margin-top:14px;padding-top:12px;border-top:1px dashed var(--line)' },
+      h('h3', {}, 'Identity document'),
+      h('div', { class: 'muted small', style: 'margin-bottom:8px' }, 'Optional, but it is the most reliable way to tell two people with the same name apart. An exact ID number match on a list is flagged even if the name is spelled differently.'),
+      h('div', { class: 'grid' }, field('Document type', f.idType), field('Document number', f.idNumber), field('Issuing country', f.idCountry), field('Issue date', f.idIssue), field('Expiry date', f.idExpiry))));
+  const read = () => ({ name: f.name.value, type: f.type.value, role: f.role.value, dob: f.dob.value, gender: f.gender.value, nationality: f.nationality.value, country: f.country.value, idType: f.idType.value, idNumber: f.idNumber.value, idCountry: f.idCountry.value, idIssue: f.idIssue.value, idExpiry: f.idExpiry.value });
   return { root, read };
 }
 
@@ -285,6 +302,7 @@ function hitCard(sc, sub, hit) {
     ['List', list ? list.name : hit.listKey],
     ['Matched on', hit.isAlias ? 'Alias: ' + hit.matchedName : 'Primary name'],
     ['Entry type', hit.type === 'person' ? 'Individual' : hit.type === 'company' ? 'Entity' : 'Other'],
+    ['ID matched', hit.idMatch ? hit.idMatch.number + (hit.idMatch.type ? ' (' + hit.idMatch.type + ' on the list)' : '') : ''],
     ['Date(s) of birth', (hit.dobs || []).join('; ')],
     ['Nationality', (hit.nationalities || []).join(', ')],
     ['Reference', [hit.ref, hit.program].filter(Boolean).join(' / ')],
@@ -313,7 +331,7 @@ function renderScreening(sc) {
     sc.incomplete ? h('div', { class: 'banner red' }, h('strong', {}, 'Incomplete screening. '), 'A clear result must not be relied on.', h('ul', {}, (sc.results.incompleteReasons || []).map((r) => h('li', {}, r)))) : null,
     sc.results.subjects.map((s, i) => h('div', { class: 'panel' },
       h('h2', { style: 'margin-top:0' }, (i === 0 ? '' : s.role + ': ') + s.name),
-      h('div', { class: 'muted small', style: 'margin-bottom:10px' }, [s.type === 'company' ? 'Company' : 'Individual', s.dob && 'born ' + fmtDay(s.dob), s.nationality && 'nationality ' + s.nationality, s.country && 'country ' + s.country, s.idNumber && 'ID ' + s.idNumber].filter(Boolean).join(' | ')),
+      h('div', { class: 'muted small', style: 'margin-bottom:10px' }, [s.type === 'company' ? 'Company' : 'Individual', s.dob && 'born ' + fmtDay(s.dob), s.nationality && 'nationality ' + s.nationality, s.country && 'country ' + s.country, s.idNumber && (s.idType || 'ID') + ' ' + s.idNumber].filter(Boolean).join(' | ')),
       s.hits.length ? s.hits.map((hit) => hitCard(sc, s, hit)) : h('div', { class: 'banner green' }, 'No possible matches on the lists screened.'),
       s.countryFlags.length ? h('div', { class: 'banner amber' }, s.countryFlags.map((f) => h('div', {}, f.role + ': ' + f.country + ' is on ' + f.listName + (f.asOf ? ' (as of ' + fmtDay(f.asOf) + ')' : '') + (f.note ? '. ' + f.note : '')))) : null,
       s.suppressed.length ? h('details', {}, h('summary', {}, s.suppressed.length + ' match(es) previously cleared as false positives'), s.suppressed.map((x) => h('div', { class: 'small muted', style: 'margin-top:6px' }, x.name + ': cleared by ' + x.cleared.by + ' on ' + fmtTime(x.cleared.at) + '. ' + x.cleared.reason))) : null,
@@ -338,7 +356,7 @@ async function viewScreening(id) {
 async function viewCustomers() {
   let q = '', status = '', page = 0;
   const body = h('div', {});
-  const qi = h('input', { placeholder: 'Search by name or reference', onkeydown: (e) => { if (e.key === 'Enter') { q = qi.value; page = 0; load(); } } });
+  const qi = h('input', { placeholder: 'Search by name, reference or ID number', onkeydown: (e) => { if (e.key === 'Enter') { q = qi.value; page = 0; load(); } } });
   const st = h('select', { onchange: () => { status = st.value; page = 0; load(); } }, h('option', { value: '' }, 'All statuses'), h('option', { value: 'open_alert' }, 'Open alert'), h('option', { value: 'confirmed_match' }, 'Confirmed match'), h('option', { value: 'clear' }, 'Clear'));
   async function load() {
     const r = await api('GET', `/customers?q=${encodeURIComponent(q)}&status=${status}&page=${page}`);
