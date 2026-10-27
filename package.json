@@ -1,0 +1,16 @@
+{
+  "name": "moneybee-screening-test",
+  "version": "0.1.0",
+  "description": "Small web page to test name screening against the UN consolidated sanctions list (and optionally a local Watchman instance)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "fast-xml-parser": "^4.5.0"
+  }
+}

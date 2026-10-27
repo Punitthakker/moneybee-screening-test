@@ -1,0 +1,17 @@
+services:
+  screening:
+    build: .
+    container_name: moneybee-screening-test
+    ports:
+      - "3000:3000"
+    environment:
+      PORT: "3000"
+      # Optional: also query a Watchman instance. From inside Docker, a Watchman running on your
+      # own machine is reachable at host.docker.internal.
+      # WATCHMAN_URL: "http://host.docker.internal:8084"
+    volumes:
+      - screening-data:/app/data
+    restart: unless-stopped
+
+volumes:
+  screening-data:
