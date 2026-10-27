@@ -265,6 +265,222 @@ if (!url) {
     assert.strictEqual(v.json.countryLists.find((l) => l.key === 'fatf_grey').verifiedBy, 'admin@example.com');
   });
 
+
+  test('official EOCN workbook: recognised, delisted skipped, import reports changes, matches', async () => {
+    const data = fs.readFileSync(path.join(__dirname, 'fixtures', 'eocn-official.xlsx')).toString('base64');
+    const p = await admin('POST', '/api/lists/uae/preview', { filename: 'eocn.xlsx', data });
+    assert.strictEqual(p.json.eocn, true, p.text);
+    assert.strictEqual(p.json.counts.individuals > 100, true);
+    assert.strictEqual(p.json.counts.skippedDelisted > 0, true);
+    const imp = await admin('POST', '/api/lists/uae/import', { filename: 'eocn.xlsx', data, mode: 'replace' });
+    assert.strictEqual(imp.status, 200, imp.text);
+    assert.strictEqual(imp.json.total, p.json.total);
+    const again = await admin('POST', '/api/lists/uae/import', { filename: 'eocn.xlsx', data, mode: 'replace' });
+    assert.strictEqual(again.json.addedIds, 0);
+    assert.strictEqual(again.json.removedIds, 0);
+    const r = await analyst('POST', '/api/screenings', { subjects: [{ name: 'Khalifa Mohd T Al Subaey', dob: '1965-01-01', nationality: 'Qatar' }] });
+    const hit = r.json.screening.results.subjects[0].hits.find((h) => h.listKey === 'uae');
+    assert.ok(hit, 'listed person is found on the UAE list');
+    const delisted = await analyst('POST', '/api/screenings', { subjects: [{ name: 'Mohammad Saeed Bin Helwan Al-Seqatri' }] });
+    assert.strictEqual(delisted.json.screening.results.subjects[0].hits.filter((h) => /SEQATRI/i.test(h.name)).length, 0, 'delisted person is not on the list');
+  });
+
+  test('ID numbers are encrypted at rest but readable and searchable in the app', async () => {
+    const r = await analyst('POST', '/api/screenings', { ref: 'ENC-1', subjects: [{ name: 'Encrypted Sample Person', idType: 'Passport', idNumber: 'P9988776' }] });
+    assert.strictEqual(r.status, 200, r.text);
+    const raw = (await db.query("select c.subjects::text as a, (select string_agg(s.results::text, '') from screenings s where s.customer_id=c.id) as b from customers c where ref='ENC-1'")).rows[0];
+    assert.ok(!raw.a.includes('P9988776') && !raw.b.includes('P9988776'), 'plain ID not stored');
+    assert.ok(raw.a.includes('enc:v1:'));
+    const detail = await analyst('GET', '/api/customers/' + r.json.customerId);
+    assert.strictEqual(detail.json.customer.subjects[0].idNumber, 'P9988776');
+    assert.strictEqual((await analyst('GET', '/api/customers?q=p-9988776')).json.rows[0].ref, 'ENC-1');
+    const { sealExisting } = require('../lib/maintenance');
+    await db.query("update customers set subjects=jsonb_set(subjects,'{0,idNumber}','\"LEGACY123\"') where ref='ENC-1'");
+    assert.ok((await sealExisting()) >= 1);
+    assert.ok(!(await db.query("select subjects::text t from customers where ref='ENC-1'")).rows[0].t.includes('LEGACY123'));
+  });
+
+  test('two-factor sign in: enrol, challenge, wrong code, recovery code, admin reset', async () => {
+    const totp = require('../lib/totp');
+    const c = client();
+    await admin('POST', '/api/users', { email: 'otp@example.com', name: 'Otp User', role: 'analyst', password: 'Temp-pass-123' });
+    await c('POST', '/api/login', { email: 'otp@example.com', password: 'Temp-pass-123' });
+    await c('POST', '/api/password', { current: 'Temp-pass-123', next: 'Otp-pass-12345' });
+    const setup = await c('POST', '/api/2fa/setup');
+    assert.match(setup.json.qr, /^data:image\/png/);
+    assert.strictEqual((await c('POST', '/api/2fa/enable', { code: '000000' })).status, 400);
+    const en = await c('POST', '/api/2fa/enable', { code: totp.code(setup.json.secret, Math.floor(Date.now() / 30000)) });
+    assert.strictEqual(en.json.recoveryCodes.length, 8);
+    const c2 = client();
+    const l = await c2('POST', '/api/login', { email: 'otp@example.com', password: 'Otp-pass-12345' });
+    assert.strictEqual(l.json.needs2fa, true);
+    assert.strictEqual((await c2('GET', '/api/me')).status, 401, 'no session before the code');
+    assert.strictEqual((await c2('POST', '/api/login/2fa', { challenge: l.json.challenge, code: '123456' })).status, 401);
+    const ok = await c2('POST', '/api/login/2fa', { challenge: l.json.challenge, code: totp.code(setup.json.secret, Math.floor(Date.now() / 30000)) });
+    assert.strictEqual(ok.status, 200, ok.text);
+    assert.strictEqual((await c2('GET', '/api/me')).status, 200);
+    assert.strictEqual((await c2('POST', '/api/login/2fa', { challenge: 'x.1.y', code: '1' })).status, 401);
+    const c3 = client();
+    const l3 = await c3('POST', '/api/login', { email: 'otp@example.com', password: 'Otp-pass-12345' });
+    const rec = await c3('POST', '/api/login/2fa', { challenge: l3.json.challenge, code: en.json.recoveryCodes[0] });
+    assert.strictEqual(rec.status, 200);
+    const c4 = client();
+    const l4 = await c4('POST', '/api/login', { email: 'otp@example.com', password: 'Otp-pass-12345' });
+    assert.strictEqual((await c4('POST', '/api/login/2fa', { challenge: l4.json.challenge, code: en.json.recoveryCodes[0] })).status, 401, 'recovery code works once');
+    const uid = (await admin('GET', '/api/users')).json.rows.find((u) => u.email === 'otp@example.com').id;
+    await admin('PATCH', '/api/users/' + uid, { resetTwoFactor: true });
+    assert.strictEqual((await client()('POST', '/api/login', { email: 'otp@example.com', password: 'Otp-pass-12345' })).json.needs2fa, undefined);
+  });
+
+  test('require two-factor blocks work until the user enrols', async () => {
+    const c = client();
+    await admin('POST', '/api/users', { email: 'must@example.com', name: 'Must', role: 'analyst', password: 'Temp-pass-123' });
+    await c('POST', '/api/login', { email: 'must@example.com', password: 'Temp-pass-123' });
+    await c('POST', '/api/password', { current: 'Temp-pass-123', next: 'Must-pass-12345' });
+    assert.strictEqual((await admin('PUT', '/api/settings/security', { require2fa: true })).status, 400, 'admin must enrol first');
+    const totp = require('../lib/totp');
+    const as = await admin('POST', '/api/2fa/setup');
+    await admin('POST', '/api/2fa/enable', { code: totp.code(as.json.secret, Math.floor(Date.now() / 30000)) });
+    await admin('GET', '/api/me');
+    assert.strictEqual((await admin('PUT', '/api/settings/security', { require2fa: true })).status, 200);
+    const blocked = await c('GET', '/api/customers');
+    assert.strictEqual(blocked.status, 403);
+    assert.strictEqual(blocked.json.mustEnroll2fa, true);
+    assert.strictEqual((await c('POST', '/api/2fa/setup')).status, 200);
+    await admin('PUT', '/api/settings/security', { require2fa: false });
+    assert.strictEqual((await c('GET', '/api/customers')).status, 200);
+    const off = await admin('POST', '/api/2fa/disable', { password: 'Better-pass-22', code: totp.code(as.json.secret, Math.floor(Date.now() / 30000)) });
+    assert.strictEqual(off.status, 200, off.text);
+  });
+
+  test('four-eyes: true match needs a different person to approve', async () => {
+    await admin('PUT', '/api/settings/security', { fourEyes: true });
+    const r = await analyst('POST', '/api/screenings', { ref: 'FE-1', subjects: [{ name: 'Alexei Testov Demoson', dob: '1975-03-12' }] });
+    const sc = r.json.screening;
+    const sub = sc.results.subjects[0];
+    const hit = sub.hits[0];
+    const key = hit.listKey + ':' + hit.entryId;
+    const rev = await analyst('POST', `/api/screenings/${sc.id}/review`, { subjectKey: sub.key, hitKey: key, decision: 'true_match', reason: 'Name and date of birth agree' });
+    assert.strictEqual(rev.json.awaitingApproval, true);
+    assert.strictEqual(rev.json.screening.reviewStatus, 'open');
+    assert.strictEqual(rev.json.screening.outcome, 'pending_approval');
+    const self = await analyst('POST', `/api/screenings/${sc.id}/approve`, { subjectKey: sub.key, hitKey: key, approve: true });
+    assert.strictEqual(self.status, 400);
+    assert.match(self.json.error, /different person/);
+    assert.strictEqual((await viewer('POST', `/api/screenings/${sc.id}/approve`, { subjectKey: sub.key, hitKey: key, approve: true })).status, 403);
+    const rej = await admin('POST', `/api/screenings/${sc.id}/approve`, { subjectKey: sub.key, hitKey: key, approve: false });
+    assert.strictEqual(rej.status, 400, 'a rejection needs a reason');
+    await analyst('POST', `/api/screenings/${sc.id}/review`, { subjectKey: sub.key, hitKey: key, decision: 'true_match', reason: 'Confirmed again' });
+    const ok = await admin('POST', `/api/screenings/${sc.id}/approve`, { subjectKey: sub.key, hitKey: key, approve: true, note: 'Agreed' });
+    assert.strictEqual(ok.status, 200, ok.text);
+    assert.strictEqual(ok.json.screening.reviewStatus, 'closed');
+    assert.strictEqual(ok.json.screening.outcome, 'true_match');
+    assert.strictEqual(ok.json.screening.dispositions[0].approval, 'approved');
+    const again = await analyst('POST', '/api/screenings', { ref: 'FE-1', subjects: [{ name: 'Alexei Testov Demoson', dob: '1975-03-12' }] });
+    assert.ok(again.json.screening.results.subjects[0].hits[0].previouslyConfirmed, 'approved match is carried forward');
+    await admin('PUT', '/api/settings/security', { fourEyes: false });
+  });
+
+  test('risk rating, explanation, override and periodic review', async () => {
+    const r = await analyst('POST', '/api/screenings', { ref: 'RISK-1', subjects: [{ name: 'Risky Trading Company', type: 'company', country: 'Kuwait' }] });
+    const c = (await analyst('GET', '/api/customers/' + r.json.customerId)).json.customer;
+    assert.strictEqual(c.risk_rating, 'medium');
+    assert.ok(c.risk_factors.factors.some((f) => /Kuwait/.test(f.label)));
+    assert.ok(new Date(c.next_review_at) > new Date());
+    const bad = await analyst('PATCH', `/api/customers/${c.id}/risk`, { override: 'low', reason: 'x' });
+    assert.strictEqual(bad.status, 400);
+    const ov = await analyst('PATCH', `/api/customers/${c.id}/risk`, { override: 'high', reason: 'Senior management decision' });
+    assert.strictEqual(ov.json.customer.risk_rating, 'high');
+    await db.query("update customers set next_review_at = now() - interval '1 day' where id=$1", [c.id]);
+    assert.strictEqual((await analyst('GET', '/api/customers?due=yes')).json.rows.some((x) => x.id === c.id), true);
+    const done = await analyst('POST', `/api/customers/${c.id}/review-complete`, { note: 'ok' });
+    assert.ok(new Date(done.json.customer.next_review_at) > new Date());
+    assert.strictEqual((await analyst('GET', '/api/customers?due=yes')).json.rows.some((x) => x.id === c.id), false);
+    assert.strictEqual((await analyst('GET', '/api/customers?rating=high')).json.rows.some((x) => x.id === c.id), true);
+  });
+
+  test('clients are separated: a client user cannot see or touch another client', async () => {
+    const a = (await admin('POST', '/api/clients', { name: 'Client Alpha' })).json;
+    const b = (await admin('POST', '/api/clients', { name: 'Client Beta' })).json;
+    assert.strictEqual((await analyst('POST', '/api/clients', { name: 'x' })).status, 403);
+    const ua = client();
+    const ub = client();
+    for (const [c, email, cl] of [[ua, 'alpha@example.com', a], [ub, 'beta@example.com', b]]) {
+      const mk = await admin('POST', '/api/users', { email, name: email, role: 'analyst', password: 'Temp-pass-123', clientId: cl.id });
+      assert.strictEqual(mk.status, 200, mk.text);
+      await c('POST', '/api/login', { email, password: 'Temp-pass-123' });
+      await c('POST', '/api/password', { current: 'Temp-pass-123', next: 'Client-pass-123' });
+    }
+    const sa = await ua('POST', '/api/screenings', { ref: 'SAME-REF', subjects: [{ name: 'Alpha Customer', idType: 'Passport', idNumber: 'ALPHA1234' }] });
+    const sb = await ub('POST', '/api/screenings', { ref: 'SAME-REF', subjects: [{ name: 'Beta Customer' }] });
+    assert.strictEqual(sa.status, 200, sa.text);
+    assert.strictEqual(sb.status, 200, sb.text);
+    assert.notStrictEqual(sa.json.customerId, sb.json.customerId, 'the same reference can exist in two clients');
+    assert.strictEqual((await ub('GET', '/api/customers/' + sa.json.customerId)).status, 404);
+    assert.strictEqual((await ub('GET', '/api/screenings/' + sa.json.screeningId)).status, 404);
+    assert.strictEqual((await ub('GET', `/api/screenings/${sa.json.screeningId}/pdf`)).status, 404);
+    assert.strictEqual((await ub('POST', `/api/customers/${sa.json.customerId}/rescreen`)).status, 404);
+    assert.strictEqual((await ub('PATCH', `/api/customers/${sa.json.customerId}`, { monitor: true })).status, 404);
+    const listB = (await ub('GET', '/api/customers')).json;
+    assert.deepStrictEqual(listB.rows.map((r) => r.name), ['Beta Customer']);
+    assert.strictEqual((await ub('GET', '/api/customers?q=ALPHA1234')).json.rows.length, 0, 'ID search does not cross clients');
+    assert.strictEqual((await ub('GET', '/api/alerts?status=all')).json.rows.every((r) => r.name === 'Beta Customer'), true);
+    const dash = (await ub('GET', '/api/dashboard')).json;
+    assert.strictEqual(dash.customers.total, 1);
+    const csv = (await ub('GET', '/api/customers.csv', null, true)).buf.toString();
+    assert.ok(!csv.includes('Alpha Customer'));
+    const spoof = await ub('GET', '/api/customers?client=' + a.id);
+    assert.deepStrictEqual(spoof.json.rows.map((r) => r.name), ['Beta Customer'], 'a client user cannot widen scope with ?client=');
+    const plat = (await admin('GET', '/api/customers?client=' + a.id)).json;
+    assert.deepStrictEqual(plat.rows.map((r) => r.name), ['Alpha Customer']);
+    const dest = await ub('POST', '/api/screenings', { subjects: [{ name: 'Sneaky' }], clientId: a.id });
+    assert.strictEqual((await ub('GET', '/api/customers/' + dest.json.customerId)).status, 200, 'client users are always placed in their own client');
+    assert.strictEqual((await ua('GET', '/api/customers/' + dest.json.customerId)).status, 404);
+  });
+
+  test('notifications: webhook receives a message without ID numbers; private addresses are refused', async () => {
+    const http = require('http');
+    const got = [];
+    const hook = http.createServer((req, res) => {
+      let b = '';
+      req.on('data', (d) => (b += d));
+      req.on('end', () => { got.push(b); res.end('ok'); });
+    });
+    await new Promise((r) => hook.listen(0, '127.0.0.1', r));
+    const notify = require('../lib/notify');
+    const bad = await admin('PUT', '/api/settings/security', { notifications: { enabled: true, webhookUrl: 'https://127.0.0.1/hook', events: {} } });
+    assert.strictEqual(bad.status, 400);
+    assert.match(bad.json.error, /public/);
+    process.env.ALLOW_INSECURE_WEBHOOK = 'true';
+    const ok = await admin('PUT', '/api/settings/security', { notifications: { enabled: true, webhookUrl: `http://127.0.0.1:${hook.address().port}/h`, events: { alert: true, confirmed: true } } });
+    assert.strictEqual(ok.status, 200, ok.text);
+    const t = await admin('POST', '/api/settings/notifications/test');
+    assert.strictEqual(t.json.webhook, 'sent');
+    const out = await notify.notify('alert', 'Subject line', 'Body without secrets');
+    assert.strictEqual(out.webhook, 'sent');
+    assert.ok(got.some((b) => b.includes('Subject line')));
+    assert.ok(!got.join('').includes('P9988776'));
+    await admin('PUT', '/api/settings/security', { notifications: { enabled: false, webhookUrl: '', events: {} } });
+    assert.strictEqual((await notify.notify('alert', 'Off', 'x')).skipped, true);
+    delete process.env.ALLOW_INSECURE_WEBHOOK;
+    hook.close();
+  });
+
+  test('retention: bad values refused, old customers purged, confirmed matches kept', async () => {
+    assert.strictEqual((await admin('PUT', '/api/settings/security', { retentionYears: 2 })).status, 400);
+    const old = await analyst('POST', '/api/screenings', { ref: 'OLD-1', subjects: [{ name: 'Long Gone Customer' }] });
+    await db.query("update customers set created_at=now() - interval '8 years', last_screened_at=now() - interval '7 years' where id=$1", [old.json.customerId]);
+    await db.query("update customers set last_screened_at=now() - interval '9 years', risk_status='confirmed_match' where ref='FE-1'");
+    assert.strictEqual((await admin('PUT', '/api/settings/security', { retentionYears: 5 })).status, 200);
+    assert.strictEqual((await admin('GET', '/api/retention/preview')).json.eligible, 1);
+    const { applyRetention } = require('../lib/maintenance');
+    const out = await applyRetention();
+    assert.strictEqual(out.deleted, 1);
+    assert.strictEqual((await db.query("select count(*)::int n from customers where ref='OLD-1'")).rows[0].n, 0);
+    assert.strictEqual((await db.query("select count(*)::int n from customers where ref='FE-1'")).rows[0].n, 1);
+    await admin('PUT', '/api/settings/security', { retentionYears: 0 });
+  });
+
   test('teardown', async () => {
     server.close();
     await db.close();

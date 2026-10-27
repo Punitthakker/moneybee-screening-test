@@ -3,7 +3,7 @@
 // never innerHTML, because list entries and customer names are untrusted.
 
 const $app = document.getElementById('app');
-const state = { user: null, meta: null, alertCount: 0 };
+const state = { user: null, meta: null, alertCount: 0, clientFilter: '' };
 
 function h(tag, props, ...kids) {
   const el = document.createElement(tag);
@@ -32,6 +32,7 @@ function toast(msg, isErr) {
 }
 
 async function api(method, path, body) {
+  if (method === 'GET' && state.clientFilter && state.user && !state.user.clientId) path += (path.includes('?') ? '&' : '?') + 'client=' + encodeURIComponent(state.clientFilter);
   const res = await fetch('/api' + path, {
     method,
     headers: { 'content-type': 'application/json', 'x-requested-with': 'fetch' },
@@ -47,6 +48,8 @@ async function api(method, path, body) {
       renderLogin();
     } else if (res.status === 403 && data && data.mustChange) {
       renderPasswordChange(true);
+    } else if (res.status === 403 && data && data.mustEnroll2fa) {
+      renderTwoFactorSetup(true);
     }
     const e = new Error((data && data.error) || 'Request failed (' + res.status + ')');
     e.status = res.status;
@@ -90,8 +93,10 @@ const NAV = [
   ['batch', 'Batch', () => true],
   ['lists', 'Lists', () => true],
   ['users', 'Users', isAdmin],
+  ['clients', 'Clients', () => isAdmin() && !state.user.clientId],
   ['audit', 'Audit log', isAdmin],
   ['settings', 'Settings', isAdmin],
+  ['security', 'My security', () => true],
 ];
 
 async function refreshAlertCount() {
@@ -108,11 +113,22 @@ function shell(active, content) {
       h('nav', {}, NAV.filter((n) => n[2]()).map(([key, label]) =>
         h('a', { href: '#/' + key, class: key === active ? 'on' : '' }, label, key === 'alerts' && state.alertCount ? h('span', { class: 'badge' }, state.alertCount) : null))),
       listHealth(),
+      clientSwitcher(),
       h('div', { class: 'who' }, state.user.name + ' (' + state.user.role + ')'),
       h('button', { onclick: () => guard(async () => { await api('POST', '/logout'); state.user = null; renderLogin(); }) }, 'Sign out')),
     h('main', {}, content));
 }
 
+
+function clientSwitcher() {
+  const cs = (state.meta && state.meta.clients) || [];
+  if (!state.user.clientId && cs.length > 1) {
+    const sel = h('select', { style: 'width:auto;padding:4px 8px', title: 'Show one client only', onchange: () => { state.clientFilter = sel.value; route(); } }, h('option', { value: '' }, 'All clients'), cs.map((c) => h('option', { value: c.id }, c.name)));
+    sel.value = state.clientFilter;
+    return sel;
+  }
+  return null;
+}
 
 function listHealth() {
   const bad = ((state.meta && state.meta.lists) || []).filter((l) => l.kind === 'sanctions' && l.required && (l.status !== 'ready' || l.stale));
@@ -135,7 +151,10 @@ async function viewDashboard() {
       kpi(d.customers.monitored, 'Under ongoing monitoring', '#/customers'),
       kpi(d.week.week, 'Screenings in the last 7 days', '#/customers'),
       kpi(d.customers.confirmed, 'Confirmed true matches', '#/customers', d.customers.confirmed ? 'red' : null),
-      kpi(d.week.incomplete, 'Incomplete screenings, last 7 days', '#/lists', d.week.incomplete ? 'amber' : 'green')),
+      kpi(d.week.incomplete, 'Incomplete screenings, last 7 days', '#/lists', d.week.incomplete ? 'amber' : 'green'),
+      kpi(d.customers.review_due, 'Customer reviews due', '#/customers?due', d.customers.review_due ? 'amber' : 'green'),
+      d.pendingApproval ? kpi(d.pendingApproval, 'True matches awaiting second approval', '#/alerts', 'amber') : null),
+    h('div', { class: 'panel' }, h('h3', {}, 'Customers by risk rating'), h('div', { class: 'row' }, pill(d.customers.high + ' high', 'red'), pill(d.customers.medium + ' medium', 'amber'), pill(d.customers.low + ' low', 'green'))),
     h('div', { class: 'two-col', style: 'display:grid;grid-template-columns:1fr 1fr;gap:16px' },
       h('div', { class: 'panel' }, h('h3', {}, 'Screenings per day'),
         h('div', { style: 'display:flex;gap:8px;align-items:flex-end;height:110px' }, d.days.map((x) => h('div', { style: 'flex:1;text-align:center', title: x.n + ' screenings, ' + x.alerts + ' with alerts' },
@@ -158,6 +177,7 @@ function renderLogin() {
     e.preventDefault();
     guard(async () => {
       const r = await api('POST', '/login', { email: email.value, password: pw.value });
+      if (r.needs2fa) return renderTwoFactorLogin(r.challenge);
       state.user = r.user;
       if (r.user.mustChange) return renderPasswordChange(true);
       boot();
@@ -169,6 +189,50 @@ function renderLogin() {
     h('button', { class: 'primary', type: 'submit' }, 'Sign in'));
   $app.replaceChildren(form);
   email.focus();
+}
+
+function renderTwoFactorLogin(challenge) {
+  const code = h('input', { inputmode: 'numeric', autocomplete: 'one-time-code', required: true, placeholder: '6-digit code or a recovery code' });
+  const form = h('form', { class: 'panel login', onsubmit: (e) => {
+    e.preventDefault();
+    guard(async () => {
+      const r = await api('POST', '/login/2fa', { challenge, code: code.value });
+      state.user = r.user;
+      if (r.user.mustChange) return renderPasswordChange(true);
+      boot();
+    });
+  } },
+    h('h1', {}, 'Two-factor sign in'),
+    h('p', { class: 'muted' }, 'Open your authenticator app and enter the 6-digit code for MoneyBee Screening.'),
+    field('Code', code), h('div', { style: 'height:16px' }),
+    h('div', { class: 'row' }, h('button', { class: 'primary', type: 'submit' }, 'Verify'), h('button', { type: 'button', onclick: renderLogin }, 'Back')));
+  $app.replaceChildren(form);
+  code.focus();
+}
+
+function renderTwoFactorSetup(forced) {
+  const box = h('div', {});
+  const code = h('input', { inputmode: 'numeric', placeholder: '6-digit code' });
+  const start = async () => {
+    const s = await api('POST', '/2fa/setup');
+    box.replaceChildren(
+      h('p', {}, '1. Scan this code with Google Authenticator, Microsoft Authenticator or 1Password.'),
+      h('img', { src: s.qr, alt: 'QR code to scan', width: 220, height: 220, style: 'background:#fff;border-radius:8px' }),
+      h('p', { class: 'muted small' }, 'Cannot scan? Enter this key by hand: ', h('span', { class: 'mono' }, s.secret)),
+      h('p', {}, '2. Enter the 6-digit code it shows.'), code,
+      h('div', { class: 'row', style: 'margin-top:12px' }, h('button', { class: 'primary', onclick: () => guard(async () => {
+        const r = await api('POST', '/2fa/enable', { code: code.value });
+        state.user.twoFactor = true;
+        state.user.mustEnroll2fa = false;
+        box.replaceChildren(h('div', { class: 'banner green' }, 'Two-factor sign in is on.'),
+          h('p', {}, 'Save these recovery codes somewhere safe. Each works once if you lose your phone. They will not be shown again.'),
+          h('pre', { class: 'mono panel' }, r.recoveryCodes.join('\n')),
+          h('button', { class: 'primary', onclick: () => { location.hash = '#/security'; boot(); } }, 'Done'));
+      }) }, 'Turn on')));
+  };
+  const content = [h('h1', {}, 'Set up two-factor sign in'), forced ? h('div', { class: 'banner amber' }, 'Your organisation requires two-factor sign in. Set it up to continue.') : null, h('div', { class: 'panel' }, box, h('button', { class: 'primary', onclick: () => guard(start) }, 'Start setup'))];
+  if (forced) $app.replaceChildren(h('main', {}, content));
+  else shell('security', content);
 }
 
 function renderPasswordChange(forced) {
@@ -283,6 +347,9 @@ function viewScreen() {
   const primary = partyBlock(0);
   const ref = h('input', { placeholder: 'Leave blank to generate one' });
   const monitor = h('input', { type: 'checkbox' });
+  const clients = (state.meta.clients || []).filter((c) => c.active);
+  const clientSel = clients.length > 1 && !state.user.clientId ? h('select', {}, clients.map((c) => h('option', { value: c.id }, c.name))) : null;
+  if (clientSel && state.clientFilter) clientSel.value = state.clientFilter;
   const crit = criteriaFields(state.meta.criteria, state.meta.sanctionLists.concat(state.meta.countryLists));
   const submit = h('button', { class: 'primary', type: 'submit' }, 'Screen');
   const form = h('form', { onsubmit: (e) => {
@@ -291,13 +358,14 @@ function viewScreen() {
     submit.textContent = 'Screening...';
     guard(async () => {
       const subjects = [primary.read(), ...parties.map((p) => p.read())];
-      const r = await api('POST', '/screenings', { ref: ref.value, monitor: monitor.checked, subjects, criteria: crit.read() });
+      const r = await api('POST', '/screenings', { ref: ref.value, monitor: monitor.checked, subjects, criteria: crit.read(), clientId: clientSel ? clientSel.value : undefined });
       location.hash = '#/screening/' + r.screeningId;
     }).finally(() => { submit.disabled = false; submit.textContent = 'Screen'; });
   } },
     h('div', { class: 'panel' }, h('h3', {}, 'Customer'), primary.root,
       h('div', { class: 'grid', style: 'margin-top:12px' }, field('Customer reference', ref, 'Use an existing reference to screen the same customer again.'),
-        h('div', {}, h('label', {}, 'Ongoing monitoring'), h('label', { class: 'check' }, monitor, 'Re-screen automatically when lists change')))),
+        h('div', {}, h('label', {}, 'Ongoing monitoring'), h('label', { class: 'check' }, monitor, 'Re-screen automatically when lists change')),
+        clientSel ? field('Client', clientSel, 'Which client this customer belongs to.') : null)),
     h('div', { class: 'panel' }, h('div', { class: 'row spread' }, h('h3', {}, 'Related parties'), h('button', { type: 'button', onclick: addParty }, 'Add related party')),
       h('div', { class: 'muted small' }, 'Directors, shareholders and beneficial owners are screened with the same criteria and appear on the same report.'), partyBox),
     h('details', { class: 'panel' }, h('summary', {}, 'Scan criteria (defaults are set by an administrator)'), h('div', { style: 'margin-top:12px' }, crit.root)),
@@ -323,6 +391,18 @@ function flagPills(hit) {
   if (f.country === 'match') out.push(pill('Country matches', 'red'));
   else if (f.country === 'mismatch') out.push(pill('Country differs', 'green'));
   return out;
+}
+
+function approvalControls(sc, sub, key, dec) {
+  if (dec.byId === state.user.id) return h('div', { class: 'banner amber small' }, 'A different person must approve this true match (four-eyes rule). You made the decision.');
+  const note = h('input', { placeholder: 'Note (required if rejecting)' });
+  const act = (approve) => guard(async () => {
+    const r = await api('POST', `/screenings/${sc.id}/approve`, { subjectKey: sub.key, hitKey: key, approve, note: note.value });
+    toast(approve ? 'Approved.' : 'Rejected. The match is open for review again.');
+    await refreshAlertCount();
+    renderScreening(r.screening);
+  });
+  return h('div', { class: 'grid', style: 'margin-bottom:8px' }, field('Second approval', note), h('div', { class: 'row', style: 'align-items:flex-end' }, h('button', { class: 'primary', onclick: () => act(true) }, 'Approve true match'), h('button', { class: 'danger', onclick: () => act(false) }, 'Reject')));
 }
 
 function hitCard(sc, sub, hit) {
@@ -353,13 +433,15 @@ function hitCard(sc, sub, hit) {
     hit.previouslyConfirmed ? h('div', { class: 'banner red small' }, 'Confirmed as a true match earlier by ' + hit.previouslyConfirmed.by + ' (screening #' + hit.previouslyConfirmed.screeningId + ').') : null,
     h('dl', { class: 'kv' }, kv.flatMap(([k, v]) => [h('dt', {}, k), h('dd', {}, v)])),
     h('div', { class: 'review' },
-      dec ? h('div', { style: 'margin-bottom:8px' }, pill(DECISIONS[dec.decision], dec.decision === 'false_positive' ? 'green' : 'red'), ' ', h('span', { class: 'muted small' }, dec.by + ', ' + fmtTime(dec.at) + ': ' + dec.reason)) : h('div', { style: 'margin-bottom:8px' }, pill('Awaiting review', 'amber')),
+      dec ? h('div', { style: 'margin-bottom:8px' }, pill(DECISIONS[dec.decision], dec.decision === 'false_positive' ? 'green' : 'red'), ' ', dec.approval === 'pending' ? pill('Awaiting second approval', 'amber') : dec.approval === 'approved' ? pill('Approved by ' + dec.approvedBy, 'green') : null, ' ', h('span', { class: 'muted small' }, dec.by + ', ' + fmtTime(dec.at) + ': ' + dec.reason)) : h('div', { style: 'margin-bottom:8px' }, pill('Awaiting review', 'amber')),
+      dec && dec.approval === 'pending' && canWrite() ? approvalControls(sc, sub, key, dec) : null,
       canWrite() ? h('div', { class: 'grid' }, field('Decision', decision), field('Reason', reason), save) : null));
 }
 
 function renderScreening(sc) {
   const rs = sc.reviewStatus;
-  const state1 = rs === 'none' ? pill('No possible matches', 'green') : rs === 'open' ? pill('Open: awaiting review', 'red') : pill('Closed: ' + (sc.outcome === 'true_match' ? 'true match confirmed' : 'cleared'), sc.outcome === 'true_match' ? 'red' : 'green');
+  const state1 = rs === 'none' ? pill('No possible matches', 'green') : rs === 'open' ? pill(sc.outcome === 'pending_approval' ? 'Open: true match awaiting second approval' : 'Open: awaiting review', 'red') : pill('Closed: ' + (sc.outcome === 'true_match' ? 'true match confirmed' : 'cleared'), sc.outcome === 'true_match' ? 'red' : 'green');
+  const pendingApproval = sc.outcome === 'pending_approval';
   shell('customers', [
     h('div', { class: 'row spread' },
       h('div', {}, h('h1', {}, sc.customerName), h('div', { class: 'muted' }, sc.customerRef + ' | screened ' + fmtTime(sc.createdAt) + ' by ' + sc.createdBy.name + ' | ' + sc.trigger)),
@@ -392,23 +474,46 @@ async function viewScreening(id) {
 }
 
 // ---------------------------------------------------------------- customers and alerts
+const RATING = { high: ['High', 'red'], medium: ['Medium', 'amber'], low: ['Low', 'green'] };
+const ratingPill = (r) => (r ? pill(RATING[r][0], RATING[r][1]) : '');
+function dueText(t) {
+  if (!t) return '';
+  const d = new Date(t);
+  const over = d < new Date();
+  return h('span', { style: over ? 'color:var(--red);font-weight:600' : '' }, d.toLocaleDateString('en-GB', { dateStyle: 'medium' }) + (over ? ' (overdue)' : ''));
+}
+
 async function viewCustomers() {
-  let q = '', status = '', page = 0;
+  let q = '', status = '', page = 0, rating = '', due = /due/.test(location.hash);
   const body = h('div', {});
   const qi = h('input', { placeholder: 'Search by name, reference or ID number', onkeydown: (e) => { if (e.key === 'Enter') { q = qi.value; page = 0; load(); } } });
   const st = h('select', { onchange: () => { status = st.value; page = 0; load(); } }, h('option', { value: '' }, 'All statuses'), h('option', { value: 'open_alert' }, 'Open alert'), h('option', { value: 'confirmed_match' }, 'Confirmed match'), h('option', { value: 'clear' }, 'Clear'));
+  const rt = h('select', { onchange: () => { rating = rt.value; page = 0; load(); } }, h('option', { value: '' }, 'All risk ratings'), h('option', { value: 'high' }, 'High risk'), h('option', { value: 'medium' }, 'Medium risk'), h('option', { value: 'low' }, 'Low risk'));
+  const dueBox = h('input', { type: 'checkbox', checked: due, onchange: () => { due = dueBox.checked; page = 0; load(); } });
   async function load() {
-    const r = await api('GET', `/customers?q=${encodeURIComponent(q)}&status=${status}&page=${page}`);
+    const r = await api('GET', `/customers?q=${encodeURIComponent(q)}&status=${status}&page=${page}&rating=${rating}&due=${due ? 'yes' : ''}`);
     body.replaceChildren(
-      h('div', { class: 'tbl-wrap' }, h('table', {}, h('thead', {}, h('tr', {}, ['Reference', 'Name', 'Type', 'Status', 'Monitored', 'Last screened', 'Screenings'].map((x) => h('th', {}, x)))),
+      h('div', { class: 'tbl-wrap' }, h('table', {}, h('thead', {}, h('tr', {}, ['Reference', 'Name', 'Type', 'Status', 'Risk', 'Next review', 'Monitored', 'Last screened'].map((x) => h('th', {}, x)))),
         h('tbody', {}, r.rows.length ? r.rows.map((c) => h('tr', { class: 'click', onclick: () => (location.hash = '#/customer/' + c.id) },
           h('td', { class: 'mono' }, c.ref), h('td', {}, c.name), h('td', {}, c.type === 'company' ? 'Company' : 'Individual'),
-          h('td', {}, pill(RISK[c.risk_status][0], RISK[c.risk_status][1])), h('td', {}, c.monitor ? 'Yes' : 'No'), h('td', {}, fmtTime(c.last_screened_at)), h('td', {}, c.screenings))) : h('tr', {}, h('td', { colspan: 7, class: 'muted' }, 'No customers yet. Screen someone to create the first one.'))))),
+          h('td', {}, pill(RISK[c.risk_status][0], RISK[c.risk_status][1])), h('td', {}, ratingPill(c.risk_rating)), h('td', { class: 'small' }, dueText(c.next_review_at)), h('td', {}, c.monitor ? 'Yes' : 'No'), h('td', {}, fmtTime(c.last_screened_at)))) : h('tr', {}, h('td', { colspan: 8, class: 'muted' }, 'No customers yet. Screen someone to create the first one.'))))),
       h('div', { class: 'row spread', style: 'margin-top:10px' }, h('span', { class: 'muted small' }, r.total + ' customers'),
         h('div', { class: 'row' }, h('button', { disabled: page === 0, onclick: () => { page--; load(); } }, 'Previous'), h('button', { disabled: (page + 1) * 50 >= r.total, onclick: () => { page++; load(); } }, 'Next'))));
   }
-  shell('customers', [h('div', { class: 'row spread' }, h('h1', {}, 'Customers'), h('a', { class: 'btn', href: '/api/customers.csv' }, 'Export CSV')), h('div', { class: 'row', style: 'margin:12px 0' }, qi, st), body]);
+  shell('customers', [h('div', { class: 'row spread' }, h('h1', {}, 'Customers'), h('a', { class: 'btn', href: '/api/customers.csv' }, 'Export CSV')), h('div', { class: 'row', style: 'margin:12px 0' }, qi, st, rt, h('label', { class: 'check', style: 'white-space:nowrap' }, dueBox, 'Review due')), body]);
   await load();
+}
+
+function riskPanel(c, id) {
+  const f = (c.risk_factors && c.risk_factors.factors) || [];
+  const ov = h('select', {}, h('option', { value: '' }, 'Use the calculated rating'), ['high', 'medium', 'low'].map((x) => h('option', { value: x }, 'Override: ' + RATING[x][0])));
+  ov.value = c.risk_override || '';
+  const why = h('input', { placeholder: 'Reason for the override', value: c.risk_override_reason || '' });
+  return h('div', { class: 'panel' }, h('div', { class: 'row spread' }, h('h3', {}, 'Risk rating and review'), h('div', { class: 'row' }, ratingPill(c.risk_rating), c.risk_override ? pill('Overridden', 'grey') : null, c.risk_score != null ? h('span', { class: 'muted small' }, 'score ' + c.risk_score) : null)),
+    f.length ? h('ul', { class: 'small', style: 'margin:6px 0 10px;padding-left:18px' }, f.map((x) => h('li', {}, x.label + ' (+' + x.points + ')'))) : h('div', { class: 'muted small' }, 'No risk factors found.'),
+    h('div', { class: 'row spread' }, h('div', {}, 'Next periodic review: ', dueText(c.next_review_at), c.last_reviewed_at ? h('span', { class: 'muted small' }, '  last reviewed ' + fmtTime(c.last_reviewed_at)) : null),
+      canWrite() ? h('button', { onclick: () => guard(async () => { await api('POST', `/customers/${id}/review-complete`, {}); toast('Review recorded.'); viewCustomer(id); }) }, 'Mark review complete') : null),
+    canWrite() ? h('div', { class: 'grid', style: 'margin-top:10px' }, field('Rating', ov), field('Reason', why), h('div', { style: 'align-self:end' }, h('button', { onclick: () => guard(async () => { await api('PATCH', `/customers/${id}/risk`, { override: ov.value || null, reason: why.value }); toast('Rating updated.'); viewCustomer(id); }) }, 'Save rating'))) : null);
 }
 
 async function viewCustomer(id) {
@@ -418,6 +523,7 @@ async function viewCustomer(id) {
     h('div', { class: 'row spread' }, h('div', {}, h('h1', {}, c.name), h('div', { class: 'muted' }, c.ref + ' | ' + (c.type === 'company' ? 'Company' : 'Individual'))),
       canWrite() ? h('button', { class: 'primary', onclick: () => guard(async () => { const r = await api('POST', `/customers/${id}/rescreen`); await refreshAlertCount(); location.hash = '#/screening/' + r.screeningId; }) }, 'Screen again') : null),
     h('div', { style: 'margin:12px 0' }, pill(RISK[c.risk_status][0], RISK[c.risk_status][1]), ' ', h('label', { class: 'check', style: 'display:inline-flex;margin-left:12px' }, mon, 'Ongoing monitoring')),
+    riskPanel(c, id),
     h('div', { class: 'panel' }, h('h3', {}, 'Names on file'), h('div', { class: 'tbl-wrap' }, h('table', {}, h('thead', {}, h('tr', {}, ['Name', 'Role', 'Born', 'Nationality', 'Country', 'ID'].map((x) => h('th', {}, x)))),
       h('tbody', {}, c.subjects.map((s) => h('tr', {}, h('td', {}, s.name), h('td', {}, s.role), h('td', {}, fmtDay(s.dob)), h('td', {}, s.nationality), h('td', {}, s.country), h('td', {}, s.idNumber))))))),
     h('h2', {}, 'Screening history'),
@@ -496,6 +602,17 @@ function uploadPanel(list, reload) {
     if (!f) return;
     const data = toBase64(await f.arrayBuffer());
     const p = await api('POST', `/lists/${list.key}/preview`, { filename: f.name, data });
+    if (p.eocn) {
+      out.replaceChildren(
+        h('div', { class: 'banner green' }, 'Recognised the official EOCN workbook: ' + p.total + ' active listings (' + p.counts.individuals + ' individuals, ' + p.counts.organisations + ' organisations, ' + p.counts.entities + ' entities). ' + p.counts.skippedDelisted + ' delisted rows are ignored.'),
+        h('div', { class: 'muted small' }, 'First listings: ' + p.sample.map((x) => x.name).join('; ')),
+        h('div', { class: 'row end', style: 'margin-top:10px' }, h('button', { class: 'primary', onclick: () => guard(async () => {
+          const r = await api('POST', `/lists/${list.key}/import`, { filename: f.name, data, mode: 'replace' });
+          toast(`Imported. ${r.addedIds} added, ${r.removedIds} removed. The list now has ${r.total} records.`);
+          reload();
+        }) }, 'Import the list')));
+      return;
+    }
     payload = { filename: f.name, data, headerRow: p.headerRow };
     const headers = p.headers.map((x) => x).filter(Boolean);
     const sel = (value, multi) => {
@@ -521,7 +638,7 @@ function uploadPanel(list, reload) {
   }));
   return h('div', { class: 'panel' }, h('div', { class: 'row spread' }, h('h3', {}, 'Upload: ' + list.name),
     list.records ? h('button', { class: 'danger', onclick: () => { if (confirm('Remove all records from ' + list.name + '? Screenings will be marked incomplete until it is loaded again.')) guard(async () => { await api('DELETE', `/lists/${list.key}/entries`); reload(); }); } }, 'Remove all records') : null),
-    list.key === 'uae' ? h('p', { class: 'muted small' }, 'The UAE Local Terrorist List is published by the Executive Office for Control and Non-Proliferation as a PDF or Excel file. Download it from the EOCN site, save it as .xlsx or .csv, and upload it here each time it changes. Until you do, every screening is marked incomplete.') : h('p', { class: 'muted small' }, 'Your own internal watchlist. Optional.'),
+    list.key === 'uae' ? h('p', { class: 'muted small' }, 'Upload the official .xlsx workbook from the Executive Office for Control and Non-Proliferation (EOCN) as it is published. It is read automatically, delisted names are ignored, and the screen shows how many listings were added or removed. Until a list is loaded, every screening is marked incomplete.') : h('p', { class: 'muted small' }, 'Your own internal watchlist. Optional.'),
     file, out);
 }
 
@@ -577,19 +694,21 @@ async function viewUsers() {
   const r = await api('GET', '/users');
   const email = h('input', { type: 'email' }), name = h('input', {}), pw = h('input', { type: 'text', autocomplete: 'off' });
   const role = h('select', {}, ['analyst', 'viewer', 'admin'].map((x) => h('option', { value: x }, x)));
+  const cl = (await api('GET', '/clients')).rows;
+  const clientSel = h('select', {}, !state.user.clientId ? h('option', { value: '' }, 'Platform (all clients)') : null, cl.map((c) => h('option', { value: c.id }, c.name)));
   shell('users', [
     h('h1', {}, 'Users'),
-    h('div', { class: 'tbl-wrap' }, h('table', {}, h('thead', {}, h('tr', {}, ['Name', 'Email', 'Role', 'Status', 'Last sign in', ''].map((x) => h('th', {}, x)))),
+    h('div', { class: 'tbl-wrap' }, h('table', {}, h('thead', {}, h('tr', {}, ['Name', 'Email', 'Role', 'Client', '2FA', 'Status', 'Last sign in', ''].map((x) => h('th', {}, x)))),
       h('tbody', {}, r.rows.map((u) => {
         const rs = h('select', { onchange: () => guard(async () => { await api('PATCH', '/users/' + u.id, { role: rs.value }); toast('Role updated.'); }) }, ['admin', 'analyst', 'viewer'].map((x) => h('option', { value: x }, x)));
         rs.value = u.role;
-        return h('tr', {}, h('td', {}, u.name), h('td', {}, u.email), h('td', {}, rs), h('td', {}, u.active ? pill('Active', 'green') : pill('Disabled', 'red'), u.must_change ? ' ' : null, u.must_change ? pill('Must change password', 'amber') : null), h('td', {}, fmtTime(u.last_login)),
+        return h('tr', {}, h('td', {}, u.name), h('td', {}, u.email), h('td', {}, rs), h('td', { class: 'small' }, u.client_name || 'Platform (all clients)'), h('td', {}, u.two_factor ? pill('On', 'green') : pill('Off', 'grey')), h('td', {}, u.active ? pill('Active', 'green') : pill('Disabled', 'red'), u.must_change ? ' ' : null, u.must_change ? pill('Must change password', 'amber') : null), h('td', {}, fmtTime(u.last_login)),
           h('td', {}, h('div', { class: 'row' },
             h('button', { onclick: () => guard(async () => { await api('PATCH', '/users/' + u.id, { active: !u.active }); viewUsers(); }) }, u.active ? 'Disable' : 'Enable'),
-            h('button', { onclick: () => { const p = prompt('New temporary password for ' + u.email + ' (10+ characters, letters and a number). They must change it at next sign in.'); if (p) guard(async () => { await api('PATCH', '/users/' + u.id, { password: p }); toast('Password reset.'); }); } }, 'Reset password'))));
+            h('button', { onclick: () => { const p = prompt('New temporary password for ' + u.email + ' (10+ characters, letters and a number). They must change it at next sign in.'); if (p) guard(async () => { await api('PATCH', '/users/' + u.id, { password: p }); toast('Password reset.'); }); } }, 'Reset password'), u.two_factor ? h('button', { onclick: () => { if (confirm('Turn off two-factor for ' + u.email + '? They will be signed out and can set it up again.')) guard(async () => { await api('PATCH', '/users/' + u.id, { resetTwoFactor: true }); toast('Two-factor reset.'); viewUsers(); }); } }, 'Reset 2FA') : null)));
       })))),
-    h('div', { class: 'panel' }, h('h3', {}, 'Add a user'), h('div', { class: 'grid' }, field('Name', name), field('Email', email), field('Role', role, 'Analysts can screen and review. Viewers are read only.'), field('Temporary password', pw, 'They must change it at first sign in.')),
-      h('div', { class: 'row end', style: 'margin-top:10px' }, h('button', { class: 'primary', onclick: () => guard(async () => { await api('POST', '/users', { name: name.value, email: email.value, role: role.value, password: pw.value }); toast('User added.'); viewUsers(); }) }, 'Add user'))),
+    h('div', { class: 'panel' }, h('h3', {}, 'Add a user'), h('div', { class: 'grid' }, field('Name', name), field('Email', email), field('Role', role, 'Analysts can screen and review. Viewers are read only.'), field('Temporary password', pw, 'They must change it at first sign in.'), cl.length > 1 || !state.user.clientId ? field('Client', clientSel, 'A client user only ever sees that client\'s records.') : null),
+      h('div', { class: 'row end', style: 'margin-top:10px' }, h('button', { class: 'primary', onclick: () => guard(async () => { await api('POST', '/users', { name: name.value, email: email.value, role: role.value, password: pw.value, clientId: clientSel.value || undefined }); toast('User added.'); viewUsers(); }) }, 'Add user'))),
   ]);
 }
 
@@ -608,6 +727,32 @@ async function viewAudit() {
   await load();
 }
 
+async function viewSecurity() {
+  const on = state.user.twoFactor;
+  const pw = h('input', { type: 'password', placeholder: 'Your password' }), code = h('input', { placeholder: '6-digit code' });
+  shell('security', [
+    h('h1', {}, 'My security'),
+    h('div', { class: 'panel' }, h('h3', {}, 'Two-factor sign in'), on ? [pill('On', 'green'), h('p', { class: 'muted small' }, 'You are asked for a code from your authenticator app each time you sign in.'),
+      h('div', { class: 'grid' }, field('Password', pw), field('Current code', code)),
+      h('div', { class: 'row end', style: 'margin-top:10px' }, h('button', { class: 'danger', onclick: () => guard(async () => { await api('POST', '/2fa/disable', { password: pw.value, code: code.value }); state.user.twoFactor = false; toast('Two-factor turned off.'); viewSecurity(); }) }, 'Turn off'))]
+      : [pill('Off', 'amber'), h('p', { class: 'muted small' }, 'Adds a second step at sign in. Strongly recommended for anyone who can see customer data.'), h('button', { class: 'primary', onclick: () => renderTwoFactorSetup(false) }, 'Set up')]),
+    h('div', { class: 'panel' }, h('h3', {}, 'Password'), h('button', { onclick: () => renderPasswordChange(false) }, 'Change my password')),
+  ]);
+}
+
+async function viewClients() {
+  const r = await api('GET', '/clients');
+  const name = h('input', { placeholder: 'Client name' });
+  shell('clients', [
+    h('h1', {}, 'Clients'),
+    h('p', { class: 'muted' }, 'Each client has its own customers, screenings, alerts, batches and users. A client user can never see another client\'s records. Staff on the platform account see all clients and can switch between them from the header.'),
+    h('div', { class: 'tbl-wrap' }, h('table', {}, h('thead', {}, h('tr', {}, ['Client', 'Customers', 'Users', 'Status', ''].map((x) => h('th', {}, x)))),
+      h('tbody', {}, r.rows.map((c) => h('tr', {}, h('td', {}, c.name), h('td', {}, c.customers), h('td', {}, c.users), h('td', {}, c.active ? pill('Active', 'green') : pill('Switched off', 'red')),
+        h('td', {}, h('button', { onclick: () => guard(async () => { await api('PATCH', '/clients/' + c.id, { active: !c.active }); viewClients(); }) }, c.active ? 'Switch off' : 'Switch on'))))))),
+    h('div', { class: 'panel' }, h('h3', {}, 'Add a client'), h('div', { class: 'row' }, name, h('button', { class: 'primary', onclick: () => guard(async () => { await api('POST', '/clients', { name: name.value }); toast('Client added. Add users for them on the Users screen.'); viewClients(); }) }, 'Add client'))),
+  ]);
+}
+
 async function viewSettings() {
   const c = await api('GET', '/settings/criteria');
   const crit = criteriaFields(c, state.meta.sanctionLists.concat(state.meta.countryLists));
@@ -615,25 +760,62 @@ async function viewSettings() {
     h('h1', {}, 'Default scan criteria'),
     h('p', { class: 'muted' }, 'These apply to new screenings, to batches and to ongoing monitoring. Individual screenings can override them except in monitoring.'),
     h('div', { class: 'panel' }, crit.root, h('div', { class: 'row end', style: 'margin-top:12px' }, h('button', { class: 'primary', onclick: () => guard(async () => { await api('PUT', '/settings/criteria', crit.read()); state.meta.criteria = await api('GET', '/settings/criteria'); toast('Defaults saved.'); }) }, 'Save defaults'))),
+    await securityPanel(),
     h('div', { class: 'panel' }, h('h3', {}, 'Your account'), h('button', { onclick: () => renderPasswordChange(false) }, 'Change my password')),
   ]);
+}
+
+async function securityPanel() {
+  const s = await api('GET', '/settings/security');
+  const ret = await api('GET', '/retention/preview');
+  const four = h('input', { type: 'checkbox', checked: s.fourEyes });
+  const need2fa = h('input', { type: 'checkbox', checked: s.require2fa });
+  const years = h('input', { type: 'number', min: 0, max: 30, value: s.retentionYears });
+  const rm = (k) => h('input', { type: 'number', min: 1, max: 120, value: s.risk.reviewMonths[k] });
+  const rmH = rm('high'), rmM = rm('medium'), rmL = rm('low');
+  const n = s.notifications;
+  const nOn = h('input', { type: 'checkbox', checked: n.enabled });
+  const hook = h('input', { placeholder: 'https://hooks.slack.com/services/...', value: n.webhookUrl });
+  const mail = h('input', { type: 'email', placeholder: 'compliance@yourcompany.com', value: n.emailTo });
+  const ev = (k, label) => ({ k, el: h('input', { type: 'checkbox', checked: n.events[k] }), label });
+  const evs = [ev('alert', 'New possible match'), ev('confirmed', 'Confirmed true match'), ev('listChange', 'UAE list changed'), ev('reviewDue', 'Customer reviews due')];
+  return h('div', {},
+    h('h1', { style: 'margin-top:28px' }, 'Security and compliance'),
+    h('div', { class: 'panel' }, h('h3', {}, 'Controls'),
+      h('label', { class: 'check' }, four, 'Four-eyes: a confirmed true match needs a second person to approve it'),
+      h('label', { class: 'check', style: 'margin-top:8px' }, need2fa, 'Require two-factor sign in for everyone (users without it are asked to set it up)'),
+      h('div', { class: 'grid', style: 'margin-top:12px' }, field('Keep customer records for (years, 0 = keep everything, otherwise 5 to 30)', years, ret.years ? ret.eligible + ' customer(s) are past this period and will be deleted in the next daily run. Customers with a confirmed match are always kept.' : 'Nothing is deleted automatically.')),
+      h('p', { class: 'muted small' }, 'ID numbers are encrypted at rest (' + s.encryption.algorithm + ')' + (s.encryption.dedicatedKey ? ' with a dedicated key.' : '. Set a dedicated ID_ENC_KEY on the server for stronger separation.'))),
+    h('div', { class: 'panel' }, h('h3', {}, 'Periodic review: months between reviews'), h('div', { class: 'grid' }, field('High risk', rmH), field('Medium risk', rmM), field('Low risk', rmL))),
+    h('div', { class: 'panel' }, h('h3', {}, 'Alert notifications'),
+      h('label', { class: 'check' }, nOn, 'Send notifications'),
+      h('div', { class: 'grid', style: 'margin-top:10px' }, field('Slack, Teams or other webhook address', hook, 'Messages contain the customer reference and counts, never ID numbers.'), field('Email address' + (s.emailReady ? '' : ' (email is not set up on the server)'), mail)),
+      h('div', { class: 'row', style: 'margin-top:10px' }, evs.map((e) => h('label', { class: 'check' }, e.el, e.label))),
+      h('div', { class: 'row end', style: 'margin-top:12px' }, h('button', { onclick: () => guard(async () => { const o = await api('POST', '/settings/notifications/test'); toast('Test: ' + Object.entries(o).map(([k, v]) => k + ' ' + v).join(', ')); }) }, 'Send a test'))),
+    h('div', { class: 'row end', style: 'margin-bottom:20px' }, h('button', { class: 'primary', onclick: () => guard(async () => {
+      await api('PUT', '/settings/security', { fourEyes: four.checked, require2fa: need2fa.checked, retentionYears: Number(years.value) || 0,
+        risk: { reviewMonths: { high: Number(rmH.value), medium: Number(rmM.value), low: Number(rmL.value) } },
+        notifications: { enabled: nOn.checked, webhookUrl: hook.value, emailTo: mail.value, events: Object.fromEntries(evs.map((e) => [e.k, e.el.checked])) } });
+      toast('Saved.');
+      viewSettings();
+    }) }, 'Save security settings')));
 }
 
 // ---------------------------------------------------------------- router and boot
 const ROUTES = {
   dashboard: viewDashboard, screen: viewScreen, customers: viewCustomers, alerts: viewAlerts, batch: viewBatch, lists: viewLists,
-  users: viewUsers, audit: viewAudit, settings: viewSettings,
+  users: viewUsers, audit: viewAudit, settings: viewSettings, security: viewSecurity, clients: viewClients,
 };
 
 async function route() {
   if (!state.user) return;
   const parts = location.hash.replace(/^#\/?/, '').split('/');
-  const name = parts[0] || 'dashboard';
+  const name = (parts[0] || 'dashboard').split('?')[0];
   await guard(async () => {
     state.meta = await api('GET', '/meta');
     if (name === 'screening' && parts[1]) return viewScreening(parts[1]);
     if (name === 'customer' && parts[1]) return viewCustomer(parts[1]);
-    const adminOnly = ['users', 'audit', 'settings'];
+    const adminOnly = ['users', 'audit', 'settings', 'clients'];
     if (adminOnly.includes(name) && !isAdmin()) { location.hash = '#/screen'; return; }
     return (ROUTES[name] || viewDashboard)();
   });

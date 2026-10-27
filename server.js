@@ -8,6 +8,10 @@ const auth = require('./lib/auth');
 const { ListManager } = require('./lib/lists');
 const monitor = require('./lib/monitor');
 const buildRouter = require('./lib/routes');
+const idcrypto = require('./lib/crypto');
+const maintenance = require('./lib/maintenance');
+
+idcrypto.install();
 
 async function createApp(manager) {
   const app = express();
@@ -59,12 +63,15 @@ async function main() {
   db.init(cfg.databaseUrl, cfg.databaseSsl);
   await db.migrate();
   await auth.seedAdmin();
+  await maintenance.sealExisting();
   const manager = new ListManager();
   await manager.init();
+  await maintenance.seedUae(manager).catch((e) => console.error('[maintenance] seed failed:', e.message));
   monitor.attach(manager);
   const app = await createApp(manager);
   const server = app.listen(cfg.port, '0.0.0.0', () => console.log(`MoneyBee Screening listening on ${cfg.port}`));
   manager.startScheduler();
+  maintenance.start();
   const stop = () => server.close(() => db.close().then(() => process.exit(0)));
   process.on('SIGTERM', stop);
   process.on('SIGINT', stop);

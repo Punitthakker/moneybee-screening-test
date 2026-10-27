@@ -61,3 +61,29 @@ test('index search honours AND/OR with date of birth', () => {
   const byId = { ...base, name: 'Somebody Else', ids: [{ type: 'Passport', number: 'zz-900001', country: '' }] };
   assert.strictEqual(idx.search(byId, crit).hits.length, 1);
 });
+
+test('Canada, Switzerland and Australia parsers read the published layouts', async () => {
+  const extra = require('../lib/lists/extra');
+  const ca = extra.parseCanada('<data-set><record><Country>Russia</Country><LastName>Testov</LastName><GivenName>Ivan</GivenName><Aliases>Vanya Testov</Aliases><BirthDate>1970-02-03</BirthDate><Schedule>Schedule 1</Schedule><Item>5</Item></record><record><Entity>Example Holdings Ltd</Entity><Country>Belarus</Country><Schedule>Schedule 2</Schedule><Item>9</Item></record></data-set>');
+  assert.strictEqual(ca.entries.length, 2);
+  assert.strictEqual(ca.entries[0].name, 'Ivan Testov');
+  assert.deepStrictEqual(ca.entries[0].countries, ['RU']);
+  assert.strictEqual(ca.entries[1].type, 'company');
+  const ch = extra.parseSwiss('<swiss-sanctions-list list-date="2026-10-01"><target ssid="42"><individual><identity><name name-type="primary-name"><name-part name-part-type="given-name"><value>Karl</value></name-part><name-part name-part-type="family-name"><value>Beispiel</value></name-part></name></identity><nationality><country iso-code="CH"/></nationality></individual></target><target ssid="43"><entity><identity><name name-type="primary-name"><name-part><value>Muster AG</value></name-part></name></identity></entity></target></swiss-sanctions-list>');
+  assert.strictEqual(ch.entries.length, 2);
+  assert.strictEqual(ch.entries[0].name, 'Karl Beispiel');
+  assert.strictEqual(ch.entries[1].type, 'company');
+  assert.throws(() => extra.parseCanada('<data-set></data-set>'));
+  assert.throws(() => extra.parseSwiss('<x/>'));
+});
+
+test('EOCN reader maps Arabic nationality and document names', () => {
+  const eocn = require('../lib/lists/eocn');
+  const sheets = [{ sheet: 'الأفراد', data: [['الأفراد المدرجين في قائمة الإرهاب المحلية'], [], ['#', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r'],
+    [1, 'شخص إرهابي', 'اليمن', 'س', 'TESTOV', 'ع', 'ALI TESTOV', new Date('1980-05-06'), 'اليمن', 'ع', '-', '-', 'قطر', 'جواز السفر', 'A123456', 'اليمن', '-', '-', 'مدرج بموجب قرار مجلس الوزراء رقم (18) لسنة 2017']] }];
+  assert.ok(eocn.looksLikeEocn(sheets));
+  const e = eocn.parseWorkbook(sheets, 'uae').entries[0];
+  assert.deepStrictEqual(e.nationalities, ['YE']);
+  assert.strictEqual(e.ids[0].type, 'Passport');
+  assert.match(e.remarks, /Cabinet Resolution 18 of 2017/);
+});
