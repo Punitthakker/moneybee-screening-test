@@ -792,6 +792,10 @@ async function securityPanel() {
       h('div', { class: 'grid', style: 'margin-top:10px' }, field('Slack, Teams or other webhook address', hook, 'Messages contain the customer reference and counts, never ID numbers.'), field('Email address' + (s.emailReady ? '' : ' (email is not set up on the server)'), mail)),
       h('div', { class: 'row', style: 'margin-top:10px' }, evs.map((e) => h('label', { class: 'check' }, e.el, e.label))),
       h('div', { class: 'row end', style: 'margin-top:12px' }, h('button', { onclick: () => guard(async () => { const o = await api('POST', '/settings/notifications/test'); toast('Test: ' + Object.entries(o).map(([k, v]) => k + ' ' + v).join(', ')); }) }, 'Send a test'))),
+    !state.user.clientId ? h('div', { class: 'panel' }, h('h3', {}, 'Backup'),
+      h('p', { class: 'muted small' }, 'Download a full backup of every client, customer, screening, decision and the audit log as one file. ID numbers stay encrypted inside it, so keep your ID_ENC_KEY safe - the backup cannot be read or restored without it. Downloadable sanctions feeds are left out because they refresh on their own.'),
+      h('a', { class: 'btn', href: '/api/backup' }, 'Download full backup'),
+      h('p', { class: 'muted small', style: 'margin-top:8px' }, 'To restore, run scripts/restore.js on the server with the same key. Store backups somewhere other than Railway.')) : null,
     h('div', { class: 'row end', style: 'margin-bottom:20px' }, h('button', { class: 'primary', onclick: () => guard(async () => {
       await api('PUT', '/settings/security', { fourEyes: four.checked, require2fa: need2fa.checked, retentionYears: Number(years.value) || 0,
         risk: { reviewMonths: { high: Number(rmH.value), medium: Number(rmM.value), low: Number(rmL.value) } },

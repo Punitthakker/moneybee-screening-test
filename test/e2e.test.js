@@ -481,6 +481,40 @@ if (!url) {
     await admin('PUT', '/api/settings/security', { retentionYears: 0 });
   });
 
+
+  test('full backup: platform-admin only, ID numbers stay encrypted, round-trip restore works', async () => {
+    const seed = await admin('POST', '/api/screenings', { ref: 'BKP-1', subjects: [{ name: 'Backup Sample Person', idType: 'Passport', idNumber: 'BK7654321' }] });
+    assert.strictEqual(seed.status, 200, seed.text);
+    const bkpId = seed.json.customerId;
+    assert.strictEqual((await analyst('GET', '/api/backup')).status, 403);
+    const raw = await admin('GET', '/api/backup', null, true);
+    assert.strictEqual(raw.status, 200);
+    const text = raw.buf.toString();
+    const data = JSON.parse(text);
+    assert.ok(data.tables.customers.length >= 1);
+    assert.ok(data.tables.audit_log.length >= 1);
+    assert.ok(data.meta.counts.screenings >= 1);
+    // the sample ID P9988776 was stored encrypted; it must not appear in the clear anywhere in the backup
+    assert.ok(text.includes('enc:v1:'), 'backup keeps the encrypted form');
+    assert.ok(!text.includes('BK7654321'), 'no plain ID number in the backup');
+    // round-trip: wipe and restore into the same database, then read back through the app (which decrypts)
+    const before = (await db.query('select count(*)::int n from customers')).rows[0].n;
+    const backup = require('../lib/backup');
+    const summary = await backup.restoreBackup(data, { wipe: true });
+    assert.strictEqual(summary.customers, data.tables.customers.length);
+    assert.strictEqual((await db.query('select count(*)::int n from customers')).rows[0].n, before);
+    // restore wipes users, so active sessions cascade away: re-authenticate (same credentials survive)
+    const admin2 = client();
+    const relog = await admin2('POST', '/api/login', { email: 'admin@example.com', password: 'Better-pass-22' });
+    assert.strictEqual(relog.status, 200, relog.text);
+    const restored = await admin2('GET', '/api/customers/' + bkpId);
+    assert.strictEqual(restored.status, 200, restored.text);
+    assert.strictEqual(restored.json.customer.subjects[0].idNumber, 'BK7654321', 'encrypted ID decrypts after restore');
+    // a new insert still works (id sequence was reset)
+    const fresh = await admin2('POST', '/api/screenings', { ref: 'POST-RESTORE', subjects: [{ name: 'After Restore' }] });
+    assert.strictEqual(fresh.status, 200, fresh.text);
+  });
+
   test('teardown', async () => {
     server.close();
     await db.close();
