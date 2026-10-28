@@ -515,6 +515,52 @@ if (!url) {
     assert.strictEqual(fresh.status, 200, fresh.text);
   });
 
+
+  test('invite links: admin creates, guest sets own password and signs in, single-use, revoke, scoping', async () => {
+    // a prior test may have reset sessions, so establish fresh logins here
+    const adm = client();
+    assert.strictEqual((await adm('POST', '/api/login', { email: 'admin@example.com', password: 'Better-pass-22' })).status, 200);
+    const anl = client();
+    assert.strictEqual((await anl('POST', '/api/login', { email: 'analyst@example.com', password: 'Another-pass-9' })).status, 200);
+    assert.strictEqual((await anl('POST', '/api/invites', { email: 'x@e.com', name: 'X', role: 'viewer' })).status, 403);
+    assert.strictEqual((await adm('POST', '/api/invites', { email: 'bad', name: 'X', role: 'viewer' })).status, 400);
+    const inv = await adm('POST', '/api/invites', { email: 'guest@example.com', name: 'Guest Tester', role: 'analyst', days: 7 });
+    assert.strictEqual(inv.status, 200, inv.text);
+    assert.match(inv.json.token, /^[a-f0-9]{64}$/);
+    // appears in the pending list
+    assert.ok((await adm('GET', '/api/invites')).json.rows.some((r) => r.email === 'guest@example.com'));
+    // public lookup works without a session
+    const guest = client();
+    const look = await guest('GET', '/api/invite/' + inv.json.token);
+    assert.strictEqual(look.status, 200, look.text);
+    assert.strictEqual(look.json.name, 'Guest Tester');
+    assert.strictEqual(look.json.role, 'analyst');
+    assert.strictEqual((await guest('GET', '/api/me')).status, 401, 'not signed in before accepting');
+    // weak password refused
+    assert.strictEqual((await guest('POST', '/api/invite/' + inv.json.token + '/accept', { password: 'short' })).status, 400);
+    // accept: sets password and signs in
+    const acc = await guest('POST', '/api/invite/' + inv.json.token + '/accept', { password: 'Guest-pass-2026' });
+    assert.strictEqual(acc.status, 200, acc.text);
+    assert.strictEqual(acc.json.user.role, 'analyst');
+    assert.strictEqual((await guest('GET', '/api/me')).status, 200, 'signed in after accepting');
+    assert.strictEqual((await guest('POST', '/api/screenings', { subjects: [{ name: 'Guest Ran This' }] })).status, 200, 'analyst can work');
+    // single-use: the link no longer works, and is gone from pending
+    assert.strictEqual((await guest('GET', '/api/invite/' + inv.json.token)).status, 410);
+    assert.strictEqual((await client()('POST', '/api/invite/' + inv.json.token + '/accept', { password: 'Another-pass-99' })).status, 410);
+    assert.ok(!(await adm('GET', '/api/invites')).json.rows.some((r) => r.email === 'guest@example.com'));
+    // the new account can sign in normally afterwards
+    assert.strictEqual((await client()('POST', '/api/login', { email: 'guest@example.com', password: 'Guest-pass-2026' })).status, 200);
+    // a bad/old token is rejected
+    assert.strictEqual((await guest('GET', '/api/invite/' + 'f'.repeat(64))).status, 410);
+    // revoke: a fresh invite can be cancelled before use
+    const inv2 = await adm('POST', '/api/invites', { email: 'revoked@example.com', name: 'Revoked', role: 'viewer' });
+    const id2 = (await adm('GET', '/api/invites')).json.rows.find((r) => r.email === 'revoked@example.com').id;
+    assert.strictEqual((await adm('DELETE', '/api/invites/' + id2)).status, 200);
+    assert.strictEqual((await client()('POST', '/api/invite/' + inv2.json.token + '/accept', { password: 'Will-fail-123' })).status, 410);
+    // cannot invite an email that already has an account
+    assert.strictEqual((await adm('POST', '/api/invites', { email: 'guest@example.com', name: 'Dup', role: 'viewer' })).status, 400);
+  });
+
   test('teardown', async () => {
     server.close();
     await db.close();

@@ -235,6 +235,41 @@ function renderTwoFactorSetup(forced) {
   else shell('security', content);
 }
 
+async function renderInviteAccept(token) {
+  let info;
+  try {
+    info = await api('GET', '/invite/' + token);
+  } catch (e) {
+    $app.replaceChildren(h('div', { class: 'panel login' },
+      h('h1', {}, 'Invite link'),
+      h('div', { class: 'banner red' }, e.message || 'This invite link is invalid or has expired.'),
+      h('a', { class: 'btn', href: '#/', onclick: () => location.reload() }, 'Go to sign in')));
+    return;
+  }
+  const pw = h('input', { type: 'password', autocomplete: 'new-password', required: true });
+  const pw2 = h('input', { type: 'password', autocomplete: 'new-password', required: true });
+  const roleName = { admin: 'an administrator', analyst: 'an analyst', viewer: 'a read-only viewer' }[info.role] || info.role;
+  const form = h('form', { class: 'panel login', onsubmit: (e) => {
+    e.preventDefault();
+    guard(async () => {
+      if (pw.value !== pw2.value) throw new Error('The two passwords do not match.');
+      const r = await api('POST', '/invite/' + token + '/accept', { password: pw.value });
+      state.user = r.user;
+      location.hash = '#/dashboard';
+      await refreshAlertCount();
+      route();
+    });
+  } },
+    h('h1', {}, 'Welcome to MoneyBee Screening'),
+    h('p', { class: 'muted' }, 'Hi ' + info.name + ', you have been invited as ' + roleName + (info.clientName ? ' for ' + info.clientName : '') + '. Set a password to get started.'),
+    field('Your email', h('input', { value: info.email, disabled: true })), h('div', { style: 'height:10px' }),
+    field('Choose a password', pw, 'At least 10 characters, with letters and a number.'), h('div', { style: 'height:10px' }),
+    field('Confirm password', pw2), h('div', { style: 'height:16px' }),
+    h('button', { class: 'primary', type: 'submit' }, 'Set password and sign in'));
+  $app.replaceChildren(form);
+  pw.focus();
+}
+
 function renderPasswordChange(forced) {
   const cur = h('input', { type: 'password', autocomplete: 'current-password', required: true });
   const next = h('input', { type: 'password', autocomplete: 'new-password', required: true });
@@ -696,6 +731,7 @@ async function viewUsers() {
   const role = h('select', {}, ['analyst', 'viewer', 'admin'].map((x) => h('option', { value: x }, x)));
   const cl = (await api('GET', '/clients')).rows;
   const clientSel = h('select', {}, !state.user.clientId ? h('option', { value: '' }, 'Platform (all clients)') : null, cl.map((c) => h('option', { value: c.id }, c.name)));
+  const invitePanel = await buildInvitePanel(cl);
   shell('users', [
     h('h1', {}, 'Users'),
     h('div', { class: 'tbl-wrap' }, h('table', {}, h('thead', {}, h('tr', {}, ['Name', 'Email', 'Role', 'Client', '2FA', 'Status', 'Last sign in', ''].map((x) => h('th', {}, x)))),
@@ -707,9 +743,45 @@ async function viewUsers() {
             h('button', { onclick: () => guard(async () => { await api('PATCH', '/users/' + u.id, { active: !u.active }); viewUsers(); }) }, u.active ? 'Disable' : 'Enable'),
             h('button', { onclick: () => { const p = prompt('New temporary password for ' + u.email + ' (10+ characters, letters and a number). They must change it at next sign in.'); if (p) guard(async () => { await api('PATCH', '/users/' + u.id, { password: p }); toast('Password reset.'); }); } }, 'Reset password'), u.two_factor ? h('button', { onclick: () => { if (confirm('Turn off two-factor for ' + u.email + '? They will be signed out and can set it up again.')) guard(async () => { await api('PATCH', '/users/' + u.id, { resetTwoFactor: true }); toast('Two-factor reset.'); viewUsers(); }); } }, 'Reset 2FA') : null)));
       })))),
-    h('div', { class: 'panel' }, h('h3', {}, 'Add a user'), h('div', { class: 'grid' }, field('Name', name), field('Email', email), field('Role', role, 'Analysts can screen and review. Viewers are read only.'), field('Temporary password', pw, 'They must change it at first sign in.'), cl.length > 1 || !state.user.clientId ? field('Client', clientSel, 'A client user only ever sees that client\'s records.') : null),
+    invitePanel,
+    h('details', { class: 'panel' }, h('summary', {}, 'Or add a user with a temporary password'),
+      h('div', { class: 'grid', style: 'margin-top:12px' }, field('Name', name), field('Email', email), field('Role', role, 'Analysts can screen and review. Viewers are read only.'), field('Temporary password', pw, 'They must change it at first sign in.'), cl.length > 1 || !state.user.clientId ? field('Client', clientSel, 'A client user only ever sees that client\'s records.') : null),
       h('div', { class: 'row end', style: 'margin-top:10px' }, h('button', { class: 'primary', onclick: () => guard(async () => { await api('POST', '/users', { name: name.value, email: email.value, role: role.value, password: pw.value, clientId: clientSel.value || undefined }); toast('User added.'); viewUsers(); }) }, 'Add user'))),
   ]);
+}
+
+async function buildInvitePanel(cl) {
+  const name = h('input', { placeholder: 'Their name' });
+  const email = h('input', { type: 'email', placeholder: 'their@email.com' });
+  const role = h('select', {}, [['analyst', 'Analyst - can screen and review'], ['viewer', 'Viewer - read only'], ['admin', 'Administrator']].map(([v, t]) => h('option', { value: v }, t)));
+  const days = h('select', {}, [['7', '7 days'], ['3', '3 days'], ['14', '14 days'], ['30', '30 days']].map(([v, t]) => h('option', { value: v }, t)));
+  const clientSel = !state.user.clientId ? h('select', {}, h('option', { value: '' }, 'Platform (all clients)'), cl.map((c) => h('option', { value: c.id }, c.name))) : null;
+  const linkBox = h('div', {});
+  const pending = h('div', {});
+  const loadPending = async () => {
+    const r = await api('GET', '/invites');
+    pending.replaceChildren(r.rows.length ? h('div', { class: 'tbl-wrap', style: 'margin-top:12px' }, h('table', {},
+      h('thead', {}, h('tr', {}, ['Invited', 'Email', 'Role', 'Expires', ''].map((x) => h('th', {}, x)))),
+      h('tbody', {}, r.rows.map((i) => h('tr', {}, h('td', {}, i.name), h('td', { class: 'small' }, i.email), h('td', {}, pill(i.role, 'blue')), h('td', { class: 'small' }, fmtTime(i.expires_at)),
+        h('td', {}, h('button', { class: 'danger', onclick: () => guard(async () => { await api('DELETE', '/invites/' + i.id); toast('Invite revoked.'); loadPending(); }) }, 'Revoke'))))))) : null);
+  };
+  const create = () => guard(async () => {
+    const r = await api('POST', '/invites', { name: name.value, email: email.value, role: role.value, days: Number(days.value), clientId: clientSel ? clientSel.value || undefined : undefined });
+    const link = location.origin + '/#/invite/' + r.token;
+    const input = h('input', { value: link, readonly: true, onclick: (e) => e.target.select() });
+    linkBox.replaceChildren(h('div', { class: 'banner green', style: 'margin-top:12px' },
+      h('div', { style: 'font-weight:600;margin-bottom:6px' }, 'Invite link for ' + r.name + ' (' + r.role + ') - expires ' + fmtTime(r.expiresAt)),
+      h('div', { class: 'row' }, input, h('button', { class: 'primary', onclick: () => guard(async () => { await navigator.clipboard.writeText(link); toast('Link copied. Send it to them by WhatsApp or email.'); }) }, 'Copy link')),
+      h('div', { class: 'small', style: 'margin-top:6px' }, 'Anyone with this link can set a password and sign in once, as ' + r.role + '. It works one time and then expires.')));
+    name.value = ''; email.value = '';
+    loadPending();
+  });
+  await loadPending();
+  return h('div', { class: 'panel' }, h('h3', {}, 'Invite someone by link'),
+    h('p', { class: 'muted small' }, 'Create a link you can send to a guest or a new team member. They open it, set their own password and are signed in - you never handle their password. Each link works once and then expires.'),
+    h('div', { class: 'grid' }, field('Name', name), field('Email', email), field('Role', role), field('Link valid for', days), clientSel ? field('Client', clientSel) : null),
+    h('div', { class: 'row end', style: 'margin-top:10px' }, h('button', { class: 'primary', onclick: create }, 'Create invite link')),
+    linkBox, pending);
 }
 
 async function viewAudit() {
@@ -812,6 +884,8 @@ const ROUTES = {
 };
 
 async function route() {
+  const inv = location.hash.match(/^#\/invite\/([a-f0-9]{64})/i);
+  if (inv) return renderInviteAccept(inv[1]);
   if (!state.user) return;
   const parts = location.hash.replace(/^#\/?/, '').split('/');
   const name = (parts[0] || 'dashboard').split('?')[0];
@@ -826,6 +900,8 @@ async function route() {
 }
 
 async function boot() {
+  const inv = location.hash.match(/^#\/invite\/([a-f0-9]{64})/i);
+  if (inv) return renderInviteAccept(inv[1]);
   try {
     const me = await api('GET', '/me');
     state.user = me.user;

@@ -28,6 +28,7 @@ A screening is marked **incomplete** when a required list has no data or is olde
 * **Notifications**: Slack-compatible webhook (public https addresses only) and email when `SMTP_URL` is set. Messages never contain ID numbers.
 * **Risk rating and periodic review**: every customer gets a high, medium or low rating with the reasons listed, an optional override with a reason, and a next review date (default 6, 12 and 36 months).
 * **Client separation**: clients, client users and per-client records. A client user can never read another client's data.
+* **Invite links**: on the Users screen an administrator can create a one-time, expiring invite link (default 7 days) for a guest or new user. They open it, set their own password and are signed in - the administrator never handles their password. Links are single-use and can be revoked. The old temporary-password route is still there under "Or add a user with a temporary password".
 * **Full backup and restore**: a platform administrator can download a complete backup (every client, customer, screening, decision and the audit log) as one JSON file from Settings. ID numbers and two-factor secrets stay encrypted inside it, so it is useless without `ID_ENC_KEY`. Restore with `node scripts/restore.js <file> --confirm` against the target `DATABASE_URL` (same `ID_ENC_KEY`). Downloadable sanctions feeds are left out because they refresh themselves.
 
 ## Run locally
