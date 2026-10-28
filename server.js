@@ -63,6 +63,7 @@ async function main() {
   db.init(cfg.databaseUrl, cfg.databaseSsl);
   await db.migrate();
   await auth.seedAdmin();
+  await auth.applyAdminReset();
   await maintenance.sealExisting();
   const manager = new ListManager();
   await manager.init();
