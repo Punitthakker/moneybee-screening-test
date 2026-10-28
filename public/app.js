@@ -139,7 +139,7 @@ function listHealth() {
 async function viewDashboard() {
   const d = await api('GET', '/dashboard');
   const max = Math.max(1, ...d.days.map((x) => x.n));
-  const kpi = (n, label, href, tone) => h('a', { href, class: 'panel', style: 'text-decoration:none;margin:0;display:block' }, h('div', { style: 'font-size:28px;font-weight:600;' + (tone ? 'color:var(--' + tone + ')' : '') }, n), h('div', { class: 'muted small' }, label));
+  const kpi = (n, label, href, tone) => h('a', { href, class: 'panel kpi' + (tone ? ' tone-' + tone : ''), style: 'text-decoration:none;margin:0;display:block;color:var(--ink)' }, h('div', { class: 'n' }, n), h('div', { class: 'muted small' }, label));
   const notReady = d.lists.filter((l) => l.required && (l.status !== 'ready' || l.stale));
   shell('dashboard', [
     h('h1', {}, 'Dashboard'),
@@ -147,18 +147,18 @@ async function viewDashboard() {
     notReady.length ? h('div', { class: 'banner red' }, 'Required lists not ready: ' + notReady.map((l) => l.name).join('; ') + '. New screenings are marked incomplete.') : null,
     h('div', { class: 'grid', style: 'margin:14px 0' },
       kpi(d.openAlerts, 'Open alerts to review', '#/alerts', d.openAlerts ? 'red' : 'green'),
-      kpi(d.customers.total, 'Customers on file', '#/customers'),
-      kpi(d.customers.monitored, 'Under ongoing monitoring', '#/customers'),
-      kpi(d.week.week, 'Screenings in the last 7 days', '#/customers'),
+      kpi(d.customers.total, 'Customers on file', '#/customers', 'blue'),
+      kpi(d.customers.monitored, 'Under ongoing monitoring', '#/customers', 'violet'),
+      kpi(d.week.week, 'Screenings in the last 7 days', '#/customers', 'blue'),
       kpi(d.customers.confirmed, 'Confirmed true matches', '#/customers', d.customers.confirmed ? 'red' : null),
       kpi(d.week.incomplete, 'Incomplete screenings, last 7 days', '#/lists', d.week.incomplete ? 'amber' : 'green'),
       kpi(d.customers.review_due, 'Customer reviews due', '#/customers?due', d.customers.review_due ? 'amber' : 'green'),
       d.pendingApproval ? kpi(d.pendingApproval, 'True matches awaiting second approval', '#/alerts', 'amber') : null),
     h('div', { class: 'panel' }, h('h3', {}, 'Customers by risk rating'), h('div', { class: 'row' }, pill(d.customers.high + ' high', 'red'), pill(d.customers.medium + ' medium', 'amber'), pill(d.customers.low + ' low', 'green'))),
-    h('div', { class: 'two-col', style: 'display:grid;grid-template-columns:1fr 1fr;gap:16px' },
+    h('div', { class: 'two-col', style: 'display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start' },
       h('div', { class: 'panel' }, h('h3', {}, 'Screenings per day'),
         h('div', { style: 'display:flex;gap:8px;align-items:flex-end;height:110px' }, d.days.map((x) => h('div', { style: 'flex:1;text-align:center', title: x.n + ' screenings, ' + x.alerts + ' with alerts' },
-          h('div', { style: 'background:var(--accent);height:' + Math.round((90 * x.n) / max) + 'px;border-radius:3px 3px 0 0;min-height:2px' }), h('div', { class: 'muted small' }, x.day.slice(8)))))),
+          h('div', { style: 'background:var(--blue);height:' + Math.round((90 * x.n) / max) + 'px;border-radius:3px 3px 0 0;min-height:2px' }), h('div', { class: 'muted small' }, x.day.slice(8)))))),
       h('div', { class: 'panel' }, h('h3', {}, 'List freshness'),
         h('table', {}, h('tbody', {}, d.lists.map((l) => h('tr', {}, h('td', {}, l.name), h('td', {}, l.status === 'ready' && !l.stale ? pill('Ready', 'green') : pill(l.stale ? 'Out of date' : l.status === 'empty' ? 'No data' : l.status, 'red')), h('td', { class: 'small muted' }, l.records ? l.records.toLocaleString('en-GB') : ''))))))),
     h('h2', {}, 'Recent screenings'),
